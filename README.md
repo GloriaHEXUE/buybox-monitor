@@ -36,3 +36,5 @@ npm run build
 
 - Project summary: `Obsidian-项目对话整理.md`
 - Continue on another computer: `换电脑继续操作说明.md`
+
+- Deployment trigger for Vercel
