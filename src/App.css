@@ -264,6 +264,7 @@
   min-width: 0;
   padding: 22px;
   display: grid;
+  grid-template-columns: minmax(0, 1fr);
   gap: 18px;
 }
 
@@ -357,7 +358,8 @@
 .editor-panel,
 .rule-panel,
 .upload-report-panel,
-.price-focus-panel {
+.price-focus-panel,
+.buybox-day-panel {
   background: #ffffff;
   border: 1px solid #dfe6ef;
   border-radius: 10px;
@@ -698,6 +700,168 @@
   gap: 16px;
 }
 
+.buybox-day-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 16px;
+}
+
+.buybox-day-panel {
+  min-width: 0;
+  overflow: hidden;
+}
+
+.buybox-today-panel {
+  border-top: 3px solid #2f7882;
+}
+
+.buybox-yesterday-panel {
+  border-top: 3px solid #6c7480;
+}
+
+.buybox-day-heading {
+  min-height: 66px;
+}
+
+.buybox-day-heading > div {
+  display: grid;
+  gap: 3px;
+}
+
+.buybox-status-section + .buybox-status-section {
+  border-top: 1px solid #dfe6ef;
+}
+
+.buybox-status-heading {
+  min-height: 42px;
+  padding: 0 14px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  background: #f8fafc;
+}
+
+.buybox-status-heading h3 {
+  margin: 0;
+  font-size: 14px;
+}
+
+.buybox-status-heading span {
+  font-size: 12px;
+  color: #66758a;
+}
+
+.buybox-status-lost .buybox-status-heading h3 {
+  color: #a33b32;
+}
+
+.buybox-status-recovered .buybox-status-heading h3 {
+  color: #247047;
+}
+
+.buybox-table-wrap {
+  max-height: 230px;
+}
+
+.buybox-table-wrap .buybox-empty-row {
+  cursor: default;
+}
+
+.buybox-table-wrap .buybox-empty-row td {
+  display: table-cell;
+  padding: 22px 12px;
+  color: #7a8697;
+  text-align: center;
+}
+
+.modal-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 20;
+  display: grid;
+  place-items: center;
+  padding: 20px;
+  background: rgba(12, 22, 35, 0.58);
+}
+
+.save-snapshot-dialog {
+  width: min(560px, 100%);
+  border: 1px solid #dce4ed;
+  border-radius: 8px;
+  background: #ffffff;
+  box-shadow: 0 24px 64px rgba(12, 22, 35, 0.24);
+  padding: 22px;
+}
+
+.dialog-heading {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+  color: #2f7882;
+}
+
+.dialog-heading > div {
+  display: grid;
+  gap: 4px;
+}
+
+.dialog-heading h2 {
+  margin: 0;
+  color: #152033;
+  font-size: 20px;
+}
+
+.save-snapshot-dialog p {
+  margin: 18px 0;
+  color: #4d5c70;
+  font-size: 14px;
+  line-height: 1.65;
+  overflow-wrap: anywhere;
+}
+
+.dialog-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.dialog-button {
+  min-height: 38px;
+  padding: 0 13px;
+  border: 1px solid #cfd9e4;
+  border-radius: 6px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 7px;
+  background: #ffffff;
+  color: #26384d;
+  font: inherit;
+  font-size: 13px;
+  cursor: pointer;
+}
+
+.dialog-button:hover {
+  background: #f3f7fa;
+}
+
+.dialog-button-cancel {
+  margin-right: auto;
+  color: #657287;
+}
+
+.dialog-button-primary {
+  border-color: #2f7882;
+  background: #2f7882;
+  color: #ffffff;
+}
+
+.dialog-button-primary:hover {
+  background: #266872;
+}
+
 .chart-panel {
   min-height: 292px;
   padding-bottom: 10px;
@@ -982,27 +1146,39 @@
 
 @media (max-width: 980px) {
   .app-shell {
-    grid-template-columns: 1fr;
+    grid-template-columns: minmax(0, 1fr);
+    width: 100%;
+    max-width: 100%;
   }
 
   .sidebar {
     position: static;
+    min-width: 0;
+  }
+
+  .workspace,
+  .buybox-day-grid,
+  .buybox-day-panel {
+    width: 100%;
+    min-width: 0;
+    max-width: 100%;
   }
 
   .topbar,
   .results-stack,
-  .chart-grid {
-    grid-template-columns: 1fr;
+  .chart-grid,
+  .buybox-day-grid {
+    grid-template-columns: minmax(0, 1fr);
     flex-direction: column;
   }
 
   .topbar {
-    grid-template-columns: 1fr;
+    grid-template-columns: minmax(0, 1fr);
   }
 
   .filter-grid {
     width: 100%;
-    grid-template-columns: 1fr;
+    grid-template-columns: minmax(0, 1fr);
   }
 
   .stat-grid {
@@ -1014,19 +1190,27 @@
   }
 
   .upload-report-grid {
-    grid-template-columns: 1fr;
+    grid-template-columns: minmax(0, 1fr);
   }
 
   .price-filter-grid {
-    grid-template-columns: 1fr;
+    grid-template-columns: minmax(0, 1fr);
   }
 
   .edit-form {
-    grid-template-columns: 1fr;
+    grid-template-columns: minmax(0, 1fr);
   }
 
   .file-note {
     width: 100%;
     box-sizing: border-box;
+  }
+
+  .dialog-actions {
+    display: grid;
+  }
+
+  .dialog-button-cancel {
+    margin-right: 0;
   }
 }

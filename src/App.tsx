@@ -60,6 +60,7 @@ type KeepaRow = {
   title: string
   brand: string
   price: number | null
+  newCurrent: number | null
   rank: number | null
   buyBox: string
   coupon: string
@@ -137,14 +138,30 @@ type RankTrendRow = {
   changePct: number
 }
 
+type BuyBoxStatusItem = {
+  id: string
+  owner: string
+  sku: string
+  asin: string
+  newCurrent: number
+}
+
+type BuyBoxDayBoard = {
+  date: string
+  lost: BuyBoxStatusItem[]
+  recovered: BuyBoxStatusItem[]
+}
+
 type StoredState = {
   keepaRows: KeepaRow[]
   mappingRows: MappingRow[]
   monitorRows: MonitorRow[]
   history: HistoryPoint[]
+  todayBuyBox: BuyBoxDayBoard
+  yesterdayBuyBox: BuyBoxDayBoard
 }
 
-const typedSeed = seedData as {
+const typedSeed = seedData as unknown as {
   keepaRows: KeepaRow[]
   mappingRows: MappingRow[]
   monitorRows: MonitorRow[]
@@ -160,12 +177,13 @@ const uploadLabels: Record<UploadKind, string> = {
 
 const monitorHeaders = ['运营', '组别', '账号', '平台SKU', 'Bundle主SKU', 'ASIN分类', 'ASIN', '备注']
 const mappingHeaders = ['平台SKU', '系统SKU', '运营', '小组', '店铺别名']
-const keepaHeaders = ['ASIN', 'Title', 'Brand', 'Price', 'Sales Rank: Current', 'Buy Box Seller', 'Coupon', 'Prime Price', 'Image']
+const keepaHeaders = ['ASIN', 'Title', 'Brand', 'New: Current', 'Sales Rank: Current', 'Buy Box Seller', 'Coupon', 'Prime Price', 'Image']
 const keepaFieldCandidates = {
   asin: ['ASIN', 'asin', 'Product Codes: ASIN', 'Product Codes ASIN'],
   title: ['Title', '标题', '商品标题', 'Parent Title'],
   brand: ['Brand', '品牌', 'Manufacturer'],
   price: ['Buy Box: Current', 'Amazon: Current', 'New: Current', 'Price', '今日价格', '标价'],
+  newCurrent: ['New: Current'],
   rank: ['Sales Rank: Current', '大类排名', '今天大类排名'],
   buyBox: ['Buy Box: Buy Box Seller', 'Buy Box Seller', 'Buy Box: Seller', 'buybox', 'Buy Box'],
   coupon: ['Coupon', 'Coupon：金额', 'Coupon：百分比', 'One Time Coupon: Absolute', 'One Time Coupon: Percentage'],
@@ -181,6 +199,7 @@ const normalized = (value: unknown) =>
 const asNumber = (value: unknown) => {
   if (typeof value === 'number' && Number.isFinite(value)) return value
   const text = String(value ?? '').replace(/[$,%\s,]/g, '')
+  if (!text || text === '-') return null
   const parsed = Number(text)
   return Number.isFinite(parsed) ? parsed : null
 }
@@ -244,6 +263,7 @@ const readKeepaRows = async (file: File): Promise<AnyRow[]> => {
     title: findIndex(keepaFieldCandidates.title),
     brand: findIndex(keepaFieldCandidates.brand),
     price: findIndex(keepaFieldCandidates.price),
+    newCurrent: normalizedHeaders.findIndex((header) => header === normalized('New: Current')),
     rank: findIndex(keepaFieldCandidates.rank),
     buyBox: findIndex(keepaFieldCandidates.buyBox),
     coupon: findIndex(keepaFieldCandidates.coupon),
@@ -254,12 +274,16 @@ const readKeepaRows = async (file: File): Promise<AnyRow[]> => {
   if (indices.asin === -1) {
     throw new Error('Keepa 文件中未找到 ASIN 列，请确认导出包含 ASIN 字段。')
   }
+  if (indices.newCurrent === -1) {
+    throw new Error('Keepa 文件中未找到 New: Current 列，请使用每日 Product Viewer 导出模板。')
+  }
 
   return matrix.slice(1).map((row) => ({
     ASIN: indices.asin >= 0 ? row[indices.asin] : '',
     Title: indices.title >= 0 ? row[indices.title] : '',
     Brand: indices.brand >= 0 ? row[indices.brand] : '',
     Price: indices.price >= 0 ? row[indices.price] : '',
+    'New: Current': row[indices.newCurrent],
     'Sales Rank: Current': indices.rank >= 0 ? row[indices.rank] : '',
     'Buy Box Seller': indices.buyBox >= 0 ? row[indices.buyBox] : '',
     Coupon: indices.coupon >= 0 ? row[indices.coupon] : '',
@@ -277,6 +301,7 @@ const parseKeepa = (rows: AnyRow[]): KeepaRow[] =>
         title: String(pick(row, keepaFieldCandidates.title) || '').trim(),
         brand: String(pick(row, keepaFieldCandidates.brand) || '').trim(),
         price: asNumber(pick(row, keepaFieldCandidates.price)),
+        newCurrent: asNumber(pick(row, keepaFieldCandidates.newCurrent)),
         rank: asNumber(pick(row, keepaFieldCandidates.rank)),
         buyBox: String(pick(row, keepaFieldCandidates.buyBox) || '').trim(),
         coupon: String(pick(row, keepaFieldCandidates.coupon) || '').trim(),
@@ -336,6 +361,63 @@ const mergeRecentHistory = (current: HistoryPoint[], nextRows: KeepaRow[], date:
     buyBox: row.buyBox,
   }))
   return keepRecentFiveDays([...current.filter((point) => point.date !== date), ...nextPoints])
+}
+
+const emptyBuyBoxBoard = (): BuyBoxDayBoard => ({ date: '', lost: [], recovered: [] })
+
+const normalizeKeepaRows = (rows: KeepaRow[] | undefined) =>
+  (rows ?? []).map((row) => ({
+    ...row,
+    newCurrent: typeof row.newCurrent === 'number' && Number.isFinite(row.newCurrent) ? row.newCurrent : null,
+  }))
+
+const normalizeBuyBoxBoard = (board: BuyBoxDayBoard | undefined): BuyBoxDayBoard => ({
+  date: String(board?.date ?? ''),
+  lost: Array.isArray(board?.lost) ? board.lost : [],
+  recovered: Array.isArray(board?.recovered) ? board.recovered : [],
+})
+
+const getImportDate = (fileName: string) => {
+  const fileDate = fileName.match(/\d{4}-\d{2}-\d{2}/)?.[0]
+  return fileDate ?? new Date().toLocaleDateString('sv-SE')
+}
+
+const buildBuyBoxBoard = (
+  monitorRows: MonitorRow[],
+  mappingRows: MappingRow[],
+  currentRows: KeepaRow[],
+  previousRows: KeepaRow[],
+  date: string,
+): BuyBoxDayBoard => {
+  const currentByAsin = new Map(currentRows.map((row) => [normalized(row.asin), row.newCurrent]))
+  const previousByAsin = new Map(previousRows.map((row) => [normalized(row.asin), row.newCurrent]))
+  const mappingBySku = new Map(mappingRows.map((row) => [normalized(row.sku), row]))
+  const lost: BuyBoxStatusItem[] = []
+  const recovered: BuyBoxStatusItem[] = []
+  const seen = new Set<string>()
+
+  for (const row of monitorRows) {
+    if (!normalized(row.asinType).includes('kmasin')) continue
+    const asinKey = normalized(row.asin)
+    const itemKey = `${normalized(row.sku)}::${asinKey}`
+    if (seen.has(itemKey)) continue
+    seen.add(itemKey)
+
+    const newCurrent = currentByAsin.get(asinKey)
+    if (typeof newCurrent !== 'number') continue
+    const item: BuyBoxStatusItem = {
+      id: `buybox-${itemKey}`,
+      owner: row.owner || mappingBySku.get(normalized(row.sku))?.owner || '',
+      sku: row.sku,
+      asin: row.asin,
+      newCurrent,
+    }
+
+    if (newCurrent === 0) lost.push(item)
+    if (previousByAsin.get(asinKey) === 0 && newCurrent > 0) recovered.push(item)
+  }
+
+  return { date, lost, recovered }
 }
 
 const getMetricChange = (
@@ -407,17 +489,27 @@ const getRuleMatch = (row: MonitorRow, mapping?: MappingRow, keepa?: KeepaRow): 
 }
 
 const loadInitialState = (): StoredState => {
+  const seedKeepaRows = normalizeKeepaRows(typedSeed.keepaRows)
   const fallback = {
-    keepaRows: typedSeed.keepaRows,
+    keepaRows: seedKeepaRows,
     mappingRows: typedSeed.mappingRows,
     monitorRows: typedSeed.monitorRows,
-    history: initialHistory(typedSeed.keepaRows),
+    history: initialHistory(seedKeepaRows),
+    todayBuyBox: emptyBuyBoxBoard(),
+    yesterdayBuyBox: emptyBuyBoxBoard(),
   }
   try {
     const raw = localStorage.getItem(storageKey)
     if (!raw) return fallback
     const stored = JSON.parse(raw) as StoredState
-    return { ...stored, history: keepRecentFiveDays(stored.history ?? []) }
+    return {
+      keepaRows: normalizeKeepaRows(stored.keepaRows),
+      mappingRows: stored.mappingRows ?? fallback.mappingRows,
+      monitorRows: stored.monitorRows ?? fallback.monitorRows,
+      history: keepRecentFiveDays(stored.history ?? []),
+      todayBuyBox: normalizeBuyBoxBoard(stored.todayBuyBox),
+      yesterdayBuyBox: normalizeBuyBoxBoard(stored.yesterdayBuyBox),
+    }
   } catch {
     return fallback
   }
@@ -560,12 +652,42 @@ const exportMonitorWithDuplicateMarks = (rows: MonitorRow[]) => {
   XLSX.writeFile(workbook, '重复监控关系检查表.xlsx')
 }
 
+const BuyBoxStatusSection = ({
+  title,
+  items,
+  tone,
+}: {
+  title: string
+  items: BuyBoxStatusItem[]
+  tone: 'lost' | 'recovered'
+}) => (
+  <section className={`buybox-status-section buybox-status-${tone}`}>
+    <div className="buybox-status-heading">
+      <h3>{title}</h3>
+      <span>{items.length} 条</span>
+    </div>
+    <div className="mini-table-wrap buybox-table-wrap">
+      <table className="data-table mini-table">
+        <thead><tr><th>运营</th><th>SKU</th><th>ASIN</th><th>New: Current</th></tr></thead>
+        <tbody>
+          {items.length
+            ? items.map((item) => <tr key={item.id}><td>{item.owner || '-'}</td><td>{item.sku}</td><td>{item.asin}</td><td>{item.newCurrent === 0 ? '0' : item.newCurrent.toFixed(2)}</td></tr>)
+            : <tr className="buybox-empty-row"><td colSpan={4}>暂无数据</td></tr>}
+        </tbody>
+      </table>
+    </div>
+  </section>
+)
+
 function App() {
   const initialState = useMemo(loadInitialState, [])
   const [keepaRows, setKeepaRows] = useState<KeepaRow[]>(initialState.keepaRows)
   const [mappingRows, setMappingRows] = useState<MappingRow[]>(initialState.mappingRows)
   const [monitorRows, setMonitorRows] = useState<MonitorRow[]>(initialState.monitorRows)
   const [history, setHistory] = useState<HistoryPoint[]>(initialState.history)
+  const [todayBuyBox, setTodayBuyBox] = useState<BuyBoxDayBoard>(initialState.todayBuyBox)
+  const [yesterdayBuyBox, setYesterdayBuyBox] = useState<BuyBoxDayBoard>(initialState.yesterdayBuyBox)
+  const [pendingKeepaFile, setPendingKeepaFile] = useState<File | null>(null)
   const [ownerQuery, setOwnerQuery] = useState('')
   const [skuQuery, setSkuQuery] = useState('')
   const [asinQuery, setAsinQuery] = useState('')
@@ -591,9 +713,18 @@ function App() {
   )
 
   useEffect(() => {
-    const payload: StoredState = { keepaRows, mappingRows, monitorRows, history }
+    const payload: StoredState = { keepaRows, mappingRows, monitorRows, history, todayBuyBox, yesterdayBuyBox }
     localStorage.setItem(storageKey, JSON.stringify(payload))
-  }, [history, keepaRows, mappingRows, monitorRows])
+  }, [history, keepaRows, mappingRows, monitorRows, todayBuyBox, yesterdayBuyBox])
+
+  useEffect(() => {
+    if (!pendingKeepaFile) return undefined
+    const closeOnEscape = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') cancelKeepaUpload()
+    }
+    document.addEventListener('keydown', closeOnEscape)
+    return () => document.removeEventListener('keydown', closeOnEscape)
+  }, [pendingKeepaFile])
 
   const keepaByAsin = useMemo(() => new Map(keepaRows.map((row) => [normalized(row.asin), row])), [keepaRows])
   const mappingBySku = useMemo(() => new Map(mappingRows.map((row) => [normalized(row.sku), row])), [mappingRows])
@@ -720,6 +851,10 @@ function App() {
   }, [history])
 
   const editableRows = editMode === 'monitor' ? monitorRows : mappingRows
+  const hasCurrentBuyBoxSnapshot = useMemo(
+    () => keepaRows.some((row) => typeof row.newCurrent === 'number'),
+    [keepaRows],
+  )
 
   const alertGroups = useMemo(() => {
     const missingMapping: AlertItem[] = []
@@ -728,7 +863,6 @@ function App() {
     const duplicateRelations: AlertItem[] = []
     const priceChanges: AlertItem[] = []
     const rankDrops: AlertItem[] = []
-    const buyBoxChanges: AlertItem[] = []
     const grouped = new Map<string, HistoryPoint[]>()
     const duplicateKeys = new Set<string>()
     const seenMonitorKeys = new Set<string>()
@@ -837,24 +971,6 @@ function App() {
           })
         }
       }
-      if (previous.buyBox && current.buyBox && previous.buyBox !== current.buyBox) {
-        const kmRows = relatedRows.filter((candidate) => normalized(candidate.asinType).includes('kmasin'))
-        for (const kmCandidate of kmRows) {
-          const previousText = previous.buyBox || '-'
-          const currentText = current.buyBox || '-'
-          if ((previousText === '-' && currentText !== '-') || (previousText !== '-' && currentText === '-')) {
-            const statusText = previousText === '-' ? 'Buy Box 恢复' : 'Buy Box 丢失'
-            buyBoxChanges.push({
-              id: `buybox-${asin}-${kmCandidate.sku}`,
-              message: `${kmCandidate.owner || '-'} / ${kmCandidate.sku} / ${kmCandidate.asin} ${statusText}`,
-              asin: kmCandidate.asin,
-              sku: kmCandidate.sku,
-              owner: kmCandidate.owner,
-              category: kmCandidate.asinType,
-            })
-          }
-        }
-      }
     }
 
     const groups: AlertGroup[] = [
@@ -862,7 +978,6 @@ function App() {
       { key: 'missing-mapping', title: '缺少映射', count: missingMapping.length, items: missingMapping },
       { key: 'rule-gap', title: '缺少归类规则', count: unresolvedRules.length, items: unresolvedRules },
       { key: 'duplicate', title: '重复监控关系', count: duplicateRelations.length, items: duplicateRelations },
-      { key: 'buybox', title: 'Buy Box 变化', count: buyBoxChanges.length, items: buyBoxChanges },
     ]
     return groups.filter((group) => group.count > 0)
   }, [enrichedRows, history, historyByAsin, kmAsinBySku, priceAlert, rankAlert])
@@ -885,15 +1000,6 @@ function App() {
     [alertGroups],
   )
 
-  const buyboxLostItems = useMemo(
-    () => (alertGroups.find((group) => group.key === 'buybox')?.items ?? []).filter((item) => item.message.includes('丢失')),
-    [alertGroups],
-  )
-
-  const buyboxRecoveredItems = useMemo(
-    () => (alertGroups.find((group) => group.key === 'buybox')?.items ?? []).filter((item) => item.message.includes('恢复')),
-    [alertGroups],
-  )
   const duplicateItems = useMemo(
     () => alertGroups.find((group) => group.key === 'duplicate')?.items ?? [],
     [alertGroups],
@@ -1107,44 +1213,66 @@ function App() {
     )
   }
 
+  const importKeepaFile = async (file: File, archiveCurrent: boolean) => {
+    setStatus(`正在解析 ${file.name} ...`)
+    try {
+      const rows = await readKeepaRows(file)
+      const parsed = parseKeepa(rows)
+      if (!parsed.length) throw new Error('Keepa 文件没有识别到有效 ASIN，请检查文件内容。')
+
+      const date = getImportDate(file.name)
+      const nextBoard = buildBuyBoxBoard(monitorRows, mappingRows, parsed, keepaRows, date)
+      if (archiveCurrent) {
+        const boardToArchive = todayBuyBox.date
+          ? todayBuyBox
+          : buildBuyBoxBoard(monitorRows, mappingRows, keepaRows, [], new Date().toLocaleDateString('sv-SE'))
+        setYesterdayBuyBox(boardToArchive)
+      }
+      setKeepaRows(parsed)
+      setTodayBuyBox(nextBoard)
+      setHistory((current) => mergeRecentHistory(current, parsed, date))
+
+      const missingPrice = parsed.filter((row) => row.price === null).length
+      const missingRank = parsed.filter((row) => row.rank === null).length
+      const missingNewCurrent = parsed.filter((row) => row.newCurrent === null).length
+      setUploadSummary({
+        kind: 'keepa',
+        fileName: file.name,
+        imported: parsed.length,
+        notes: [
+          `识别到 ${parsed.length} 条 ASIN`,
+          `New: Current 为空 ${missingNewCurrent} 条`,
+          `今日 Buy Box 丢失 ${nextBoard.lost.length} 条`,
+          `今日 Buy Box 恢复 ${nextBoard.recovered.length} 条`,
+          `缺少价格 ${missingPrice} 条、缺少排名 ${missingRank} 条`,
+        ],
+        errors: [],
+      })
+      setStatus(`已导入 ${parsed.length} 条 Keepa 数据：今日丢失 ${nextBoard.lost.length} 条，恢复 ${nextBoard.recovered.length} 条。`)
+    } catch (error) {
+      setUploadSummary({
+        kind: 'keepa',
+        fileName: file.name,
+        imported: 0,
+        notes: [],
+        errors: [error instanceof Error ? error.message : 'Keepa 文件解析失败，请检查导出字段。'],
+      })
+      setStatus(error instanceof Error ? error.message : 'Keepa 文件解析失败，请检查导出字段。')
+    }
+  }
+
   const handleUpload = async (kind: UploadKind, file: File | null) => {
     if (!file) return
-    setStatus(`正在解析 ${file.name} ...`)
     if (kind === 'keepa') {
-      try {
-        const rows = await readKeepaRows(file)
-        const parsed = parseKeepa(rows)
-        setKeepaRows(parsed)
-        const date = new Date().toLocaleDateString('zh-CN', { month: '2-digit', day: '2-digit' })
-        setHistory((current) => mergeRecentHistory(current, parsed, date))
-        const missingPrice = parsed.filter((row) => row.price === null).length
-        const missingRank = parsed.filter((row) => row.rank === null).length
-        const missingBuyBox = parsed.filter((row) => !row.buyBox).length
-        setUploadSummary({
-          kind,
-          fileName: file.name,
-          imported: parsed.length,
-          notes: [
-            `识别到 ${parsed.length} 条 ASIN`,
-            `缺少价格 ${missingPrice} 条`,
-            `缺少排名 ${missingRank} 条`,
-            `缺少 Buy Box ${missingBuyBox} 条`,
-          ],
-          errors: [],
-        })
-        setStatus(`已导入 ${parsed.length} 条 Keepa 数据，并按规则只提取关键字段；趋势保留最近 5 天。`)
-      } catch (error) {
-        setUploadSummary({
-          kind,
-          fileName: file.name,
-          imported: 0,
-          notes: [],
-          errors: [error instanceof Error ? error.message : 'Keepa 文件解析失败，请检查导出字段。'],
-        })
-        setStatus(error instanceof Error ? error.message : 'Keepa 文件解析失败，请检查导出字段。')
+      if (hasCurrentBuyBoxSnapshot) {
+        setPendingKeepaFile(file)
+        setStatus('检测到已有今日快照，请先选择是否保存为昨日数据。')
+      } else {
+        await importKeepaFile(file, false)
       }
       return
     }
+    setStatus(`正在解析 ${file.name} ...`)
     if (kind === 'mapping') {
       const rows = await readWorkbookRows(file)
       const parsed = parseMapping(rows)
@@ -1180,11 +1308,27 @@ function App() {
     }
   }
 
+  const continueKeepaUpload = async (archiveCurrent: boolean) => {
+    const file = pendingKeepaFile
+    if (!file) return
+    setPendingKeepaFile(null)
+    await importKeepaFile(file, archiveCurrent)
+  }
+
+  const cancelKeepaUpload = () => {
+    setPendingKeepaFile(null)
+    setStatus('已取消本次 Keepa 上传，当前今日和昨日数据未改变。')
+  }
+
   const resetToSeed = () => {
-    setKeepaRows(typedSeed.keepaRows)
+    const seedKeepaRows = normalizeKeepaRows(typedSeed.keepaRows)
+    setKeepaRows(seedKeepaRows)
     setMappingRows(typedSeed.mappingRows)
     setMonitorRows(typedSeed.monitorRows)
-    setHistory(keepRecentFiveDays(initialHistory(typedSeed.keepaRows)))
+    setHistory(keepRecentFiveDays(initialHistory(seedKeepaRows)))
+    setTodayBuyBox(emptyBuyBoxBoard())
+    setYesterdayBuyBox(emptyBuyBoxBoard())
+    setPendingKeepaFile(null)
     setSelectedAsin(typedSeed.monitorRows[0]?.asin ?? '')
     setEditingIndex(null)
     setStatus('已恢复为原 Excel 自动提取的数据。')
@@ -1263,7 +1407,7 @@ function App() {
               <label className="upload-button">
                 <Upload size={16} />
                 <span>{uploadLabels[kind]}</span>
-                <input accept=".xlsx,.xls,.csv" type="file" onChange={(event) => void handleUpload(kind, event.target.files?.[0] ?? null)} />
+                <input accept=".xlsx,.xls,.csv" type="file" onChange={(event) => { const file = event.currentTarget.files?.[0] ?? null; event.currentTarget.value = ''; void handleUpload(kind, file) }} />
               </label>
               <button className="icon-button" title="下载模板" type="button" onClick={() => downloadTemplate(kind)}>
                 <Download size={16} />
@@ -1358,7 +1502,7 @@ function App() {
 
           <div className="detail-panel">
             <div className="section-heading"><h2>ASIN 详情</h2><span>{selectedAsin || '未选择'}</span></div>
-            {selectedRows[0] ? <div className="detail-stack"><div><span className="eyebrow">商品</span><h3>{selectedRows[0].keepa?.title || selectedRows[0].asin}</h3></div>{getPrimaryImageUrl(selectedRows[0].keepa?.image) ? <div className="detail-image-wrap"><img alt={selectedRows[0].asin} className="detail-image" src={getPrimaryImageUrl(selectedRows[0].keepa?.image)} /></div> : null}<dl className="detail-list"><div><dt>运营</dt><dd>{selectedRows[0].owner || '-'}</dd></div><div><dt>SKU</dt><dd>{selectedRows[0].sku}</dd></div><div><dt>品牌</dt><dd>{selectedRows[0].keepa?.brand || '-'}</dd></div><div><dt>归类规则</dt><dd>{selectedRows[0].ruleSource}</dd></div><div><dt>Buy Box</dt><dd>{selectedRows[0].keepa?.buyBox || '-'}</dd></div><div><dt>Coupon</dt><dd>{selectedRows[0].keepa?.coupon || '-'}</dd></div></dl></div> : <p className="empty-state">点击左侧结果查看 ASIN。</p>}
+            {selectedRows[0] ? <div className="detail-stack"><div><span className="eyebrow">商品</span><h3>{selectedRows[0].keepa?.title || selectedRows[0].asin}</h3></div>{getPrimaryImageUrl(selectedRows[0].keepa?.image) ? <div className="detail-image-wrap"><img alt={selectedRows[0].asin} className="detail-image" src={getPrimaryImageUrl(selectedRows[0].keepa?.image)} /></div> : null}<dl className="detail-list"><div><dt>运营</dt><dd>{selectedRows[0].owner || '-'}</dd></div><div><dt>SKU</dt><dd>{selectedRows[0].sku}</dd></div><div><dt>品牌</dt><dd>{selectedRows[0].keepa?.brand || '-'}</dd></div><div><dt>归类规则</dt><dd>{selectedRows[0].ruleSource}</dd></div><div><dt>New: Current</dt><dd>{typeof selectedRows[0].keepa?.newCurrent === 'number' ? selectedRows[0].keepa.newCurrent.toFixed(2) : '-'}</dd></div><div><dt>Coupon</dt><dd>{selectedRows[0].keepa?.coupon || '-'}</dd></div></dl></div> : <p className="empty-state">点击左侧结果查看 ASIN。</p>}
           </div>
         </section>
 
@@ -1457,27 +1601,33 @@ function App() {
           </div>
         </section>
 
-        <section className="chart-grid">
-          <section className="price-focus-panel">
-            <div className="section-heading"><h2>Buy Box 丢失</h2><span>{buyboxLostItems.length} 条</span></div>
-            <div className="mini-table-wrap">
-              <table className="data-table mini-table">
-                <thead><tr><th>运营</th><th>SKU</th><th>ASIN</th></tr></thead>
-                <tbody>{buyboxLostItems.map((item) => <tr key={item.id}><td>{item.owner || '-'}</td><td>{item.sku || '-'}</td><td>{item.asin || '-'}</td></tr>)}</tbody>
-              </table>
-            </div>
+        <section className="buybox-day-grid" aria-label="每日 Buy Box 监测">
+          <section className="buybox-day-panel buybox-today-panel">
+            <div className="section-heading buybox-day-heading"><div><span className="eyebrow">今日维度</span><h2>Buy Box 监测</h2></div><span>{todayBuyBox.date || '等待上传'}</span></div>
+            <BuyBoxStatusSection title="Buy Box 丢失" items={todayBuyBox.lost} tone="lost" />
+            <BuyBoxStatusSection title="Buy Box 恢复" items={todayBuyBox.recovered} tone="recovered" />
           </section>
-          <section className="price-focus-panel">
-            <div className="section-heading"><h2>Buy Box 恢复</h2><span>{buyboxRecoveredItems.length} 条</span></div>
-            <div className="mini-table-wrap">
-              <table className="data-table mini-table">
-                <thead><tr><th>运营</th><th>SKU</th><th>ASIN</th></tr></thead>
-                <tbody>{buyboxRecoveredItems.map((item) => <tr key={item.id}><td>{item.owner || '-'}</td><td>{item.sku || '-'}</td><td>{item.asin || '-'}</td></tr>)}</tbody>
-              </table>
-            </div>
+          <section className="buybox-day-panel buybox-yesterday-panel">
+            <div className="section-heading buybox-day-heading"><div><span className="eyebrow">昨日维度</span><h2>Buy Box 监测</h2></div><span>{yesterdayBuyBox.date || '尚未保存'}</span></div>
+            <BuyBoxStatusSection title="Buy Box 丢失" items={yesterdayBuyBox.lost} tone="lost" />
+            <BuyBoxStatusSection title="Buy Box 恢复" items={yesterdayBuyBox.recovered} tone="recovered" />
           </section>
         </section>
       </section>
+
+      {pendingKeepaFile ? (
+        <div className="modal-backdrop">
+          <section aria-describedby="keepa-save-description" aria-labelledby="keepa-save-title" aria-modal="true" className="save-snapshot-dialog" role="dialog">
+            <div className="dialog-heading"><Save size={20} /><div><span className="eyebrow">上传每日 Keepa 数据</span><h2 id="keepa-save-title">是否保存昨日数据？</h2></div></div>
+            <p id="keepa-save-description">系统检测到已有今日快照。保存后，当前今日的丢失和恢复数据会固定到右侧昨日栏，再使用 <strong>{pendingKeepaFile.name}</strong> 更新左侧今日栏。</p>
+            <div className="dialog-actions">
+              <button className="dialog-button dialog-button-cancel" type="button" onClick={cancelKeepaUpload}>取消上传</button>
+              <button className="dialog-button" type="button" onClick={() => void continueKeepaUpload(false)}>不保存，继续</button>
+              <button autoFocus className="dialog-button dialog-button-primary" type="button" onClick={() => void continueKeepaUpload(true)}><Save size={16} />保存昨日数据并继续</button>
+            </div>
+          </section>
+        </div>
+      ) : null}
     </main>
   )
 }
