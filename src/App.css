@@ -360,6 +360,7 @@
 .upload-report-panel,
 .price-focus-panel,
 .buybox-day-panel {
+  min-width: 0;
   background: #ffffff;
   border: 1px solid #dfe6ef;
   border-radius: 10px;

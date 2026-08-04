@@ -143,7 +143,12 @@ type BuyBoxStatusItem = {
   owner: string
   sku: string
   asin: string
-  newCurrent: number
+  newCurrent: number | null
+}
+
+type PendingKeepaUpload = {
+  file: File
+  mode: 'initial' | 'from-yesterday' | 'daily'
 }
 
 type BuyBoxDayBoard = {
@@ -403,18 +408,22 @@ const buildBuyBoxBoard = (
     if (seen.has(itemKey)) continue
     seen.add(itemKey)
 
+    if (!currentByAsin.has(asinKey)) continue
     const newCurrent = currentByAsin.get(asinKey)
-    if (typeof newCurrent !== 'number') continue
     const item: BuyBoxStatusItem = {
       id: `buybox-${itemKey}`,
       owner: row.owner || mappingBySku.get(normalized(row.sku))?.owner || '',
       sku: row.sku,
       asin: row.asin,
-      newCurrent,
+      newCurrent: newCurrent ?? null,
     }
 
-    if (newCurrent === 0) lost.push(item)
-    if (previousByAsin.get(asinKey) === 0 && newCurrent > 0) recovered.push(item)
+    const isCurrentLost = newCurrent === null || newCurrent === 0
+    const previousExists = previousByAsin.has(asinKey)
+    const previousNewCurrent = previousByAsin.get(asinKey)
+    const wasPreviouslyLost = previousExists && (previousNewCurrent === null || previousNewCurrent === 0)
+    if (isCurrentLost) lost.push(item)
+    if (wasPreviouslyLost && typeof newCurrent === 'number' && newCurrent > 0) recovered.push(item)
   }
 
   return { date, lost, recovered }
@@ -671,7 +680,7 @@ const BuyBoxStatusSection = ({
         <thead><tr><th>运营</th><th>SKU</th><th>ASIN</th><th>New: Current</th></tr></thead>
         <tbody>
           {items.length
-            ? items.map((item) => <tr key={item.id}><td>{item.owner || '-'}</td><td>{item.sku}</td><td>{item.asin}</td><td>{item.newCurrent === 0 ? '0' : item.newCurrent.toFixed(2)}</td></tr>)
+            ? items.map((item) => <tr key={item.id}><td>{item.owner || '-'}</td><td>{item.sku}</td><td>{item.asin}</td><td>{item.newCurrent === null ? '空值' : item.newCurrent === 0 ? '0' : item.newCurrent.toFixed(2)}</td></tr>)
             : <tr className="buybox-empty-row"><td colSpan={4}>暂无数据</td></tr>}
         </tbody>
       </table>
@@ -687,7 +696,7 @@ function App() {
   const [history, setHistory] = useState<HistoryPoint[]>(initialState.history)
   const [todayBuyBox, setTodayBuyBox] = useState<BuyBoxDayBoard>(initialState.todayBuyBox)
   const [yesterdayBuyBox, setYesterdayBuyBox] = useState<BuyBoxDayBoard>(initialState.yesterdayBuyBox)
-  const [pendingKeepaFile, setPendingKeepaFile] = useState<File | null>(null)
+  const [pendingKeepaUpload, setPendingKeepaUpload] = useState<PendingKeepaUpload | null>(null)
   const [ownerQuery, setOwnerQuery] = useState('')
   const [skuQuery, setSkuQuery] = useState('')
   const [asinQuery, setAsinQuery] = useState('')
@@ -718,13 +727,13 @@ function App() {
   }, [history, keepaRows, mappingRows, monitorRows, todayBuyBox, yesterdayBuyBox])
 
   useEffect(() => {
-    if (!pendingKeepaFile) return undefined
+    if (!pendingKeepaUpload) return undefined
     const closeOnEscape = (event: KeyboardEvent) => {
       if (event.key === 'Escape') cancelKeepaUpload()
     }
     document.addEventListener('keydown', closeOnEscape)
     return () => document.removeEventListener('keydown', closeOnEscape)
-  }, [pendingKeepaFile])
+  }, [pendingKeepaUpload])
 
   const keepaByAsin = useMemo(() => new Map(keepaRows.map((row) => [normalized(row.asin), row])), [keepaRows])
   const mappingBySku = useMemo(() => new Map(mappingRows.map((row) => [normalized(row.sku), row])), [mappingRows])
@@ -852,8 +861,8 @@ function App() {
 
   const editableRows = editMode === 'monitor' ? monitorRows : mappingRows
   const hasCurrentBuyBoxSnapshot = useMemo(
-    () => keepaRows.some((row) => typeof row.newCurrent === 'number'),
-    [keepaRows],
+    () => Boolean(todayBuyBox.date || yesterdayBuyBox.date),
+    [todayBuyBox.date, yesterdayBuyBox.date],
   )
 
   const alertGroups = useMemo(() => {
@@ -1213,7 +1222,11 @@ function App() {
     )
   }
 
-  const importKeepaFile = async (file: File, archiveCurrent: boolean) => {
+  const importKeepaFile = async (
+    file: File,
+    target: 'today' | 'yesterday',
+    archiveCurrent = false,
+  ) => {
     setStatus(`正在解析 ${file.name} ...`)
     try {
       const rows = await readKeepaRows(file)
@@ -1221,15 +1234,17 @@ function App() {
       if (!parsed.length) throw new Error('Keepa 文件没有识别到有效 ASIN，请检查文件内容。')
 
       const date = getImportDate(file.name)
-      const nextBoard = buildBuyBoxBoard(monitorRows, mappingRows, parsed, keepaRows, date)
-      if (archiveCurrent) {
-        const boardToArchive = todayBuyBox.date
-          ? todayBuyBox
-          : buildBuyBoxBoard(monitorRows, mappingRows, keepaRows, [], new Date().toLocaleDateString('sv-SE'))
-        setYesterdayBuyBox(boardToArchive)
+      const previousRows = hasCurrentBuyBoxSnapshot ? keepaRows : []
+      const nextBoard = buildBuyBoxBoard(monitorRows, mappingRows, parsed, previousRows, date)
+      if (target === 'yesterday') {
+        const yesterdayBoard = buildBuyBoxBoard(monitorRows, mappingRows, parsed, [], date)
+        setYesterdayBuyBox(yesterdayBoard)
+        setTodayBuyBox(emptyBuyBoxBoard())
+      } else {
+        if (archiveCurrent && todayBuyBox.date) setYesterdayBuyBox(todayBuyBox)
+        setTodayBuyBox(nextBoard)
       }
       setKeepaRows(parsed)
-      setTodayBuyBox(nextBoard)
       setHistory((current) => mergeRecentHistory(current, parsed, date))
 
       const missingPrice = parsed.filter((row) => row.price === null).length
@@ -1242,13 +1257,17 @@ function App() {
         notes: [
           `识别到 ${parsed.length} 条 ASIN`,
           `New: Current 为空 ${missingNewCurrent} 条`,
-          `今日 Buy Box 丢失 ${nextBoard.lost.length} 条`,
-          `今日 Buy Box 恢复 ${nextBoard.recovered.length} 条`,
+          `${target === 'yesterday' ? '昨日基准' : '今日'} Buy Box 丢失 ${nextBoard.lost.length} 条`,
+          `${target === 'yesterday' ? '昨日基准' : '今日'} Buy Box 恢复 ${target === 'yesterday' ? 0 : nextBoard.recovered.length} 条`,
           `缺少价格 ${missingPrice} 条、缺少排名 ${missingRank} 条`,
         ],
         errors: [],
       })
-      setStatus(`已导入 ${parsed.length} 条 Keepa 数据：今日丢失 ${nextBoard.lost.length} 条，恢复 ${nextBoard.recovered.length} 条。`)
+      setStatus(
+        target === 'yesterday'
+          ? `已将 ${parsed.length} 条 Keepa 数据保存为昨日基准：丢失 ${nextBoard.lost.length} 条。`
+          : `已导入 ${parsed.length} 条 Keepa 数据：今日丢失 ${nextBoard.lost.length} 条，恢复 ${nextBoard.recovered.length} 条。`,
+      )
     } catch (error) {
       setUploadSummary({
         kind: 'keepa',
@@ -1264,12 +1283,15 @@ function App() {
   const handleUpload = async (kind: UploadKind, file: File | null) => {
     if (!file) return
     if (kind === 'keepa') {
-      if (hasCurrentBuyBoxSnapshot) {
-        setPendingKeepaFile(file)
-        setStatus('检测到已有今日快照，请先选择是否保存为昨日数据。')
-      } else {
-        await importKeepaFile(file, false)
-      }
+      const mode = !hasCurrentBuyBoxSnapshot ? 'initial' : todayBuyBox.date ? 'daily' : 'from-yesterday'
+      setPendingKeepaUpload({ file, mode })
+      setStatus(
+        mode === 'initial'
+          ? '首次导入，请选择这份 Keepa 数据作为昨日基准或今日数据。'
+          : mode === 'from-yesterday'
+            ? '检测到已保存的昨日基准，请确认更新今日数据。'
+            : '检测到已有今日快照，请选择是否保存为昨日数据。',
+      )
       return
     }
     setStatus(`正在解析 ${file.name} ...`)
@@ -1308,15 +1330,15 @@ function App() {
     }
   }
 
-  const continueKeepaUpload = async (archiveCurrent: boolean) => {
-    const file = pendingKeepaFile
-    if (!file) return
-    setPendingKeepaFile(null)
-    await importKeepaFile(file, archiveCurrent)
+  const continueKeepaUpload = async (target: 'today' | 'yesterday', archiveCurrent = false) => {
+    const pending = pendingKeepaUpload
+    if (!pending) return
+    setPendingKeepaUpload(null)
+    await importKeepaFile(pending.file, target, archiveCurrent)
   }
 
   const cancelKeepaUpload = () => {
-    setPendingKeepaFile(null)
+    setPendingKeepaUpload(null)
     setStatus('已取消本次 Keepa 上传，当前今日和昨日数据未改变。')
   }
 
@@ -1328,7 +1350,7 @@ function App() {
     setHistory(keepRecentFiveDays(initialHistory(seedKeepaRows)))
     setTodayBuyBox(emptyBuyBoxBoard())
     setYesterdayBuyBox(emptyBuyBoxBoard())
-    setPendingKeepaFile(null)
+    setPendingKeepaUpload(null)
     setSelectedAsin(typedSeed.monitorRows[0]?.asin ?? '')
     setEditingIndex(null)
     setStatus('已恢复为原 Excel 自动提取的数据。')
@@ -1615,15 +1637,32 @@ function App() {
         </section>
       </section>
 
-      {pendingKeepaFile ? (
+      {pendingKeepaUpload ? (
         <div className="modal-backdrop">
           <section aria-describedby="keepa-save-description" aria-labelledby="keepa-save-title" aria-modal="true" className="save-snapshot-dialog" role="dialog">
-            <div className="dialog-heading"><Save size={20} /><div><span className="eyebrow">上传每日 Keepa 数据</span><h2 id="keepa-save-title">是否保存昨日数据？</h2></div></div>
-            <p id="keepa-save-description">系统检测到已有今日快照。保存后，当前今日的丢失和恢复数据会固定到右侧昨日栏，再使用 <strong>{pendingKeepaFile.name}</strong> 更新左侧今日栏。</p>
+            <div className="dialog-heading"><Save size={20} /><div><span className="eyebrow">上传每日 Keepa 数据</span><h2 id="keepa-save-title">{pendingKeepaUpload.mode === 'initial' ? '首次导入：这份数据属于哪一天？' : pendingKeepaUpload.mode === 'from-yesterday' ? '使用昨日基准更新今日数据？' : '是否保存昨日数据？'}</h2></div></div>
+            <p id="keepa-save-description">
+              {pendingKeepaUpload.mode === 'initial'
+                ? <>当前没有可比较的历史快照。请选择将 <strong>{pendingKeepaUpload.file.name}</strong> 保存为昨日基准，或直接作为今日数据。</>
+                : pendingKeepaUpload.mode === 'from-yesterday'
+                  ? <>昨日基准 <strong>{yesterdayBuyBox.date}</strong> 已保存。导入 <strong>{pendingKeepaUpload.file.name}</strong> 后，系统将比较昨日与今日状态并生成恢复数据。</>
+                  : <>保存后，当前今日的丢失和恢复数据会固定到右侧昨日栏，再使用 <strong>{pendingKeepaUpload.file.name}</strong> 更新左侧今日栏。</>}
+            </p>
             <div className="dialog-actions">
               <button className="dialog-button dialog-button-cancel" type="button" onClick={cancelKeepaUpload}>取消上传</button>
-              <button className="dialog-button" type="button" onClick={() => void continueKeepaUpload(false)}>不保存，继续</button>
-              <button autoFocus className="dialog-button dialog-button-primary" type="button" onClick={() => void continueKeepaUpload(true)}><Save size={16} />保存昨日数据并继续</button>
+              {pendingKeepaUpload.mode === 'initial' ? (
+                <>
+                  <button className="dialog-button" type="button" onClick={() => void continueKeepaUpload('today')}>作为今日数据</button>
+                  <button autoFocus className="dialog-button dialog-button-primary" type="button" onClick={() => void continueKeepaUpload('yesterday')}><Save size={16} />作为昨日基准</button>
+                </>
+              ) : pendingKeepaUpload.mode === 'from-yesterday' ? (
+                <button autoFocus className="dialog-button dialog-button-primary" type="button" onClick={() => void continueKeepaUpload('today')}><Upload size={16} />更新今日数据</button>
+              ) : (
+                <>
+                  <button className="dialog-button" type="button" onClick={() => void continueKeepaUpload('today')}>不保存，继续</button>
+                  <button autoFocus className="dialog-button dialog-button-primary" type="button" onClick={() => void continueKeepaUpload('today', true)}><Save size={16} />保存昨日数据并继续</button>
+                </>
+              )}
             </div>
           </section>
         </div>
