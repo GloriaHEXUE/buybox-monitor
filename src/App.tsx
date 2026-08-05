@@ -3,10 +3,10 @@ import { useRef } from 'react'
 import {
   AlertTriangle,
   ArrowDown,
-  ArrowUpDown,
   ArrowUp,
   BarChart3,
   Bell,
+  ChevronDown,
   Download,
   Edit3,
   FileSpreadsheet,
@@ -19,8 +19,6 @@ import {
 import {
   Area,
   AreaChart,
-  Bar,
-  BarChart as RechartsBarChart,
   CartesianGrid,
   Line,
   LineChart,
@@ -113,6 +111,8 @@ type KeepaUploadReport = {
 
 type KeepaUploadReports = Record<'yesterday' | 'today', KeepaUploadReport>
 
+type ResultFilterKey = 'owner' | 'sku' | 'asinType' | 'brand' | 'asin' | 'price' | 'todayRank' | 'yesterdayRank'
+
 type AlertItem = {
   id: string
   message: string
@@ -195,14 +195,14 @@ const uploadLabels: Record<UploadKind, string> = {
 
 const monitorHeaders = ['运营', '组别', '账号', '平台SKU', 'Bundle主SKU', 'ASIN分类', 'ASIN', '备注']
 const mappingHeaders = ['平台SKU', '系统SKU', '运营', '小组', '店铺别名']
-const keepaHeaders = ['ASIN', 'Title', 'Brand', 'New: Current', 'Sales Rank: Current', 'Buy Box Seller', 'Coupon', 'Prime Price', 'Image']
+const keepaHeaders = ['ASIN', 'Title', 'Brand', 'New: Current', 'Sales Rank: Subcategory Sales Ranks', 'Buy Box Seller', 'Coupon', 'Prime Price', 'Image']
 const keepaFieldCandidates = {
   asin: ['ASIN', 'asin', 'Product Codes: ASIN', 'Product Codes ASIN'],
   title: ['Title', '标题', '商品标题', 'Parent Title'],
   brand: ['Brand', '品牌', 'Manufacturer'],
   price: ['Buy Box: Current', 'Amazon: Current', 'New: Current', 'Price', '今日价格', '标价'],
   newCurrent: ['New: Current'],
-  rank: ['Sales Rank: Current', '大类排名', '今天大类排名'],
+  rank: ['Sales Rank: Subcategory Sales Ranks'],
   buyBox: ['Buy Box: Buy Box Seller', 'Buy Box Seller', 'Buy Box: Seller', 'buybox', 'Buy Box'],
   coupon: ['Coupon', 'Coupon：金额', 'Coupon：百分比', 'One Time Coupon: Absolute', 'One Time Coupon: Percentage'],
   primePrice: ['Prime Price', 'Prime 价格', 'Prime价', 'New, Prime exclusive: Current'],
@@ -220,6 +220,15 @@ const asNumber = (value: unknown) => {
   if (!text || text === '-') return null
   const parsed = Number(text)
   return Number.isFinite(parsed) ? parsed : null
+}
+
+const asSubcategoryRank = (value: unknown) => {
+  if (typeof value === 'number' && Number.isFinite(value)) return value
+  const text = String(value ?? '').trim()
+  if (!text || text === '-') return null
+  const rankedValue = text.match(/#\s*([\d,]+)/)?.[1]
+  if (rankedValue) return asNumber(rankedValue)
+  return asNumber(text)
 }
 
 const pick = (row: AnyRow, candidates: string[]) => {
@@ -295,6 +304,9 @@ const readKeepaRows = async (file: File): Promise<AnyRow[]> => {
   if (indices.newCurrent === -1) {
     throw new Error('Keepa 文件中未找到 New: Current 列，请使用每日 Product Viewer 导出模板。')
   }
+  if (indices.rank === -1) {
+    throw new Error('Keepa 文件中未找到 Sales Rank: Subcategory Sales Ranks 列，请检查导出字段。')
+  }
 
   return matrix.slice(1).map((row) => ({
     ASIN: indices.asin >= 0 ? row[indices.asin] : '',
@@ -302,7 +314,7 @@ const readKeepaRows = async (file: File): Promise<AnyRow[]> => {
     Brand: indices.brand >= 0 ? row[indices.brand] : '',
     Price: indices.price >= 0 ? row[indices.price] : '',
     'New: Current': row[indices.newCurrent],
-    'Sales Rank: Current': indices.rank >= 0 ? row[indices.rank] : '',
+    'Sales Rank: Subcategory Sales Ranks': indices.rank >= 0 ? row[indices.rank] : '',
     'Buy Box Seller': indices.buyBox >= 0 ? row[indices.buyBox] : '',
     Coupon: indices.coupon >= 0 ? row[indices.coupon] : '',
     'Prime Price': indices.primePrice >= 0 ? row[indices.primePrice] : '',
@@ -320,7 +332,7 @@ const parseKeepa = (rows: AnyRow[]): KeepaRow[] =>
         brand: String(pick(row, keepaFieldCandidates.brand) || '').trim(),
         price: asNumber(pick(row, keepaFieldCandidates.price)),
         newCurrent: asNumber(pick(row, keepaFieldCandidates.newCurrent)),
-        rank: asNumber(pick(row, keepaFieldCandidates.rank)),
+        rank: asSubcategoryRank(pick(row, keepaFieldCandidates.rank)),
         buyBox: String(pick(row, keepaFieldCandidates.buyBox) || '').trim(),
         coupon: String(pick(row, keepaFieldCandidates.coupon) || '').trim(),
         primePrice: asNumber(pick(row, keepaFieldCandidates.primePrice)),
@@ -673,24 +685,6 @@ const exportAlertItems = (title: string, items: AlertItem[]) => {
   XLSX.writeFile(workbook, `${title}预警清单.xlsx`)
 }
 
-const exportBoardItems = (title: string, items: AlertItem[]) => {
-  const data = items.map((item) => ({
-    运营: item.owner || '',
-    KMSKU: item.kmSku || item.sku || '',
-    KMASIN: item.kmAsin || '',
-    ASIN类型: item.category || '',
-    竞对ASIN: item.asin || '',
-    KM价格: item.kmPrice ?? '',
-    当前价格: item.competitorPrice ?? '',
-    价格变化: item.changePct ?? '',
-    前次排名: item.previousRank ?? '',
-    当前排名: item.currentRank ?? '',
-  }))
-  const workbook = XLSX.utils.book_new()
-  XLSX.utils.book_append_sheet(workbook, XLSX.utils.json_to_sheet(data), '看板导出')
-  XLSX.writeFile(workbook, `${title}看板.xlsx`)
-}
-
 const exportMonitorWithDuplicateMarks = (rows: MonitorRow[]) => {
   const grouped = new Map<string, number[]>()
   rows.forEach((row, index) => {
@@ -781,11 +775,17 @@ function App() {
   const [uploadSummary, setUploadSummary] = useState<UploadSummary>(emptyUploadSummary)
   const [keepaUploadReports, setKeepaUploadReports] = useState<KeepaUploadReports>(initialState.keepaUploadReports)
   const [collapsedAlerts, setCollapsedAlerts] = useState<Record<string, boolean>>({})
-  const [priceViewOwner, setPriceViewOwner] = useState('')
-  const [priceViewSku, setPriceViewSku] = useState('')
-  const [priceViewCategory, setPriceViewCategory] = useState('')
-  const [priceSortBy, setPriceSortBy] = useState<'price-diff-desc' | 'price-diff-asc' | 'rank-diff-desc' | 'rank-diff-asc'>('price-diff-desc')
-  const [priceSortMenu, setPriceSortMenu] = useState<'price' | 'rank' | null>(null)
+  const [resultFilters, setResultFilters] = useState<Record<ResultFilterKey, string>>({
+    owner: '',
+    sku: '',
+    asinType: '',
+    brand: '',
+    asin: '',
+    price: '',
+    todayRank: '',
+    yesterdayRank: '',
+  })
+  const [openResultFilter, setOpenResultFilter] = useState<ResultFilterKey | null>(null)
   const editorPanelRef = useRef<HTMLElement | null>(null)
   const [status, setStatus] = useState(
     `已自动载入原 Excel：${initialState.monitorRows.length} 条监控清单、${initialState.mappingRows.length} 条映射、${initialState.keepaRows.length} 条 Keepa。趋势仅保留最近 5 天。`,
@@ -851,16 +851,34 @@ function App() {
     const skuNeedle = normalized(skuQuery)
     const asinNeedle = normalized(asinQuery)
     const keywordNeedle = normalized(keywordQuery)
-    return enrichedRows.filter((row) =>
-      (!ownerNeedle || normalized(row.owner).includes(ownerNeedle)) &&
-      (!skuNeedle || [row.sku, row.bundleSku].map(normalized).some((value) => value.includes(skuNeedle))) &&
-      (!asinNeedle || normalized(row.asin).includes(asinNeedle)) &&
-      (!keywordNeedle ||
-        [row.group, row.account, row.asinType, row.note, row.keepa?.brand, row.keepa?.title]
-          .map(normalized)
-          .some((value) => value.includes(keywordNeedle))),
-    )
-  }, [asinQuery, enrichedRows, keywordQuery, ownerQuery, skuQuery])
+    const columnNeedles = Object.fromEntries(
+      Object.entries(resultFilters).map(([key, value]) => [key, normalized(value)]),
+    ) as Record<ResultFilterKey, string>
+
+    return enrichedRows.filter((row) => {
+      const price = typeof row.keepa?.price === 'number' ? String(row.keepa.price) : ''
+      const todayRank = typeof row.keepa?.rank === 'number' ? String(row.keepa.rank) : ''
+      const yesterdayRank = typeof row.yesterdayKeepa?.rank === 'number' ? String(row.yesterdayKeepa.rank) : ''
+      const matchesColumns =
+        (!columnNeedles.owner || normalized(row.owner).includes(columnNeedles.owner)) &&
+        (!columnNeedles.sku || normalized(row.sku).includes(columnNeedles.sku)) &&
+        (!columnNeedles.asinType || normalized(row.asinType).includes(columnNeedles.asinType)) &&
+        (!columnNeedles.brand || normalized(row.keepa?.brand).includes(columnNeedles.brand)) &&
+        (!columnNeedles.asin || normalized(row.asin).includes(columnNeedles.asin)) &&
+        (!columnNeedles.price || normalized(price).includes(columnNeedles.price)) &&
+        (!columnNeedles.todayRank || normalized(todayRank).includes(columnNeedles.todayRank)) &&
+        (!columnNeedles.yesterdayRank || normalized(yesterdayRank).includes(columnNeedles.yesterdayRank))
+
+      return matchesColumns &&
+        (!ownerNeedle || normalized(row.owner).includes(ownerNeedle)) &&
+        (!skuNeedle || [row.sku, row.bundleSku].map(normalized).some((value) => value.includes(skuNeedle))) &&
+        (!asinNeedle || normalized(row.asin).includes(asinNeedle)) &&
+        (!keywordNeedle ||
+          [row.group, row.account, row.asinType, row.note, row.keepa?.brand, row.keepa?.title]
+            .map(normalized)
+            .some((value) => value.includes(keywordNeedle)))
+    })
+  }, [asinQuery, enrichedRows, keywordQuery, ownerQuery, resultFilters, skuQuery])
 
   const skuOptions = useMemo(() => {
     const ownerNeedle = normalized(ownerQuery)
@@ -1106,104 +1124,6 @@ function App() {
     return { direct, mapped, keepaMatched, unresolved }
   }, [enrichedRows])
 
-  const boardRows = useMemo(() => {
-    const rows: AlertItem[] = []
-    const ownerNeedle = normalized(priceViewOwner)
-    const skuNeedle = normalized(priceViewSku)
-    const categoryNeedle = normalized(priceViewCategory)
-
-    for (const [asin, points] of historyByAsin) {
-      const ordered = [...points].slice(-2)
-      if (ordered.length < 2) continue
-      const [previous, current] = ordered
-      if (typeof previous.price !== 'number' || typeof current.price !== 'number') continue
-
-      const relatedRows = enrichedRows.filter((row) => normalized(row.asin) === asin)
-      const row = relatedRows[0]
-      if (!row) continue
-
-      const sameSkuRows = row.sku ? kmAsinBySku.get(normalized(row.sku)) ?? [] : []
-      const kmRow = sameSkuRows.find((candidate) => normalized(candidate.asinType).includes('kmasin'))
-      if (!kmRow) continue
-
-      const pricePct = previous.price !== 0 ? Math.abs((current.price - previous.price) / previous.price) * 100 : 0
-      const matchesFilter =
-        (!ownerNeedle || normalized(row.owner).includes(ownerNeedle)) &&
-        (!skuNeedle || normalized(row.sku).includes(skuNeedle)) &&
-        (!categoryNeedle || normalized(row.asinType).includes(categoryNeedle))
-
-      if (!matchesFilter) continue
-
-      rows.push({
-        id: `board-${asin}`,
-        message: `${asin} 价格 / 排名变化`,
-        asin: row.asin,
-        sku: row.sku,
-        kmAsin: kmRow.asin,
-        kmSku: kmRow.sku,
-        kmPrice: kmRow.keepa?.price ?? null,
-        kmRank: kmRow.keepa?.rank ?? null,
-        competitorPrice: current.price,
-        owner: row.owner,
-        category: row.asinType,
-        previousRank: previous.rank,
-        currentRank: current.rank,
-        changePct: pricePct,
-      })
-    }
-
-    return rows
-  }, [enrichedRows, historyByAsin, kmAsinBySku, priceViewCategory, priceViewOwner, priceViewSku])
-
-  const priceAlertRows = useMemo(() => {
-    return boardRows
-      .filter((item) => typeof item.changePct === 'number' && item.changePct >= priceAlert)
-      .map((item) => {
-        const historyPoints = historyByAsin.get(normalized(item.asin))
-        const validPoints = (historyPoints ?? []).filter((point) => typeof point.price === 'number')
-        const previous = validPoints[validPoints.length - 2]?.price ?? null
-        const current = validPoints[validPoints.length - 1]?.price ?? null
-        const delta = typeof previous === 'number' && typeof current === 'number' ? current - previous : null
-        const rankDelta =
-          typeof item.previousRank === 'number' && typeof item.currentRank === 'number'
-            ? item.currentRank - item.previousRank
-            : null
-        const changePct =
-          typeof previous === 'number' && typeof current === 'number' && previous !== 0
-            ? Math.abs((current - previous) / previous) * 100
-            : null
-        return {
-          ...item,
-          previous,
-          current,
-          delta,
-          rankDelta,
-          changePct,
-        }
-      })
-      .sort((left, right) => {
-        const leftPriceDiff = Math.abs(left.delta ?? 0)
-        const rightPriceDiff = Math.abs(right.delta ?? 0)
-        const leftRankDiff = Math.abs(left.rankDelta ?? 0)
-        const rightRankDiff = Math.abs(right.rankDelta ?? 0)
-        if (priceSortBy === 'price-diff-desc') return rightPriceDiff - leftPriceDiff
-        if (priceSortBy === 'price-diff-asc') return leftPriceDiff - rightPriceDiff
-        if (priceSortBy === 'rank-diff-desc') return rightRankDiff - leftRankDiff
-        return leftRankDiff - rightRankDiff
-      })
-  }, [boardRows, historyByAsin, priceAlert, priceSortBy])
-
-  const priceBoardGroups = useMemo(() => {
-    const grouped = new Map<string, typeof priceAlertRows>()
-    for (const row of priceAlertRows) {
-      const key = `${row.owner || ''}::${row.kmSku || row.sku || ''}::${row.kmAsin || ''}`
-      grouped.set(key, [...(grouped.get(key) ?? []), row])
-    }
-    return [...grouped.values()]
-      .map((rows) => rows.sort((a, b) => (b.changePct ?? 0) - (a.changePct ?? 0)))
-      .sort((a, b) => (b[0]?.changePct ?? 0) - (a[0]?.changePct ?? 0))
-  }, [priceAlertRows])
-
   const rankTrendRows = useMemo(() => {
     const rows: RankTrendRow[] = []
     for (const [asin, points] of historyByAsin) {
@@ -1259,50 +1179,52 @@ function App() {
     )
   }
 
-  const renderBoardPriceMetric = (
+  const renderRankComparison = (
     current: number | null | undefined,
-    delta: number | null | undefined,
-    changePct: number | null | undefined,
+    previous: number | null | undefined,
   ) => {
     if (typeof current !== 'number') return '-'
-    const toneClass = typeof delta === 'number' ? (delta > 0 ? 'delta-bad' : 'delta-good') : ''
+    const change = typeof previous === 'number' ? current - previous : 0
     return (
-      <span className="inline-metric">
-        <span>{`$${current.toFixed(2)}`}</span>
-        {typeof delta === 'number' && delta !== 0 ? (
-          <span className={`${toneClass} plain-delta`}>
-            {delta > 0 ? <ArrowUp size={13} /> : <ArrowDown size={13} />}
-            <span>{`${delta > 0 ? '+' : ''}${delta.toFixed(2)}`}</span>
-            {typeof changePct === 'number' ? <span>{`(${changePct.toFixed(1)}%)`}</span> : null}
-          </span>
-        ) : null}
+      <span className="rank-comparison">
+        <span>{current.toLocaleString()}</span>
+        {change < 0 ? <span title="较昨日排名上升"><ArrowUp aria-label="排名上升" className="rank-direction rank-up" size={15} /></span> : null}
+        {change > 0 ? <span title="较昨日排名下跌"><ArrowDown aria-label="排名下跌" className="rank-direction rank-down" size={15} /></span> : null}
       </span>
     )
   }
 
-  const renderBoardRankMetric = (
-    current: number | null | undefined,
-    delta: number | null | undefined,
-    startRank?: number | null,
-  ) => {
-    if (typeof current !== 'number') return '-'
-    const isImproved = typeof delta === 'number' && delta < 0
-    const toneClass = typeof delta === 'number' ? (isImproved ? 'delta-bad' : 'delta-good') : ''
-    const pct =
-      typeof delta === 'number' && typeof startRank === 'number' && startRank !== 0
-        ? (Math.abs(delta) / startRank) * 100
-        : null
+  const renderResultHeader = (key: ResultFilterKey, label: string) => {
+    const active = Boolean(resultFilters[key])
+    const open = openResultFilter === key
     return (
-      <span className="inline-metric">
-        <span>{current.toLocaleString()}</span>
-        {typeof delta === 'number' && delta !== 0 ? (
-          <span className={`${toneClass} plain-delta`}>
-            {isImproved ? <ArrowUp size={13} /> : <ArrowDown size={13} />}
-            <span>{Math.abs(delta).toLocaleString()}</span>
-            {typeof pct === 'number' ? <span>{`(${pct.toFixed(1)}%)`}</span> : null}
-          </span>
-        ) : null}
-      </span>
+      <th>
+        <div className="result-filter-wrap">
+          <span>{label}</span>
+          <button
+            aria-expanded={open}
+            aria-label={`筛选${label}`}
+            className={`result-filter-button ${active ? 'active' : ''}`}
+            onClick={() => setOpenResultFilter((current) => current === key ? null : key)}
+            title={`筛选${label}`}
+            type="button"
+          >
+            <ChevronDown size={14} />
+          </button>
+          {open ? (
+            <div className="result-filter-menu">
+              <input
+                aria-label={`${label}筛选条件`}
+                autoFocus
+                onChange={(event) => setResultFilters((current) => ({ ...current, [key]: event.target.value }))}
+                placeholder={`筛选${label}`}
+                value={resultFilters[key]}
+              />
+              {active ? <button onClick={() => setResultFilters((current) => ({ ...current, [key]: '' }))} type="button">清除</button> : null}
+            </div>
+          ) : null}
+        </div>
+      </th>
     )
   }
 
@@ -1359,7 +1281,7 @@ function App() {
         imported: parsed.length,
         notes: [
           `识别到 ${parsed.length} 条 ASIN`,
-          `Sales Rank: Current 有效 ${parsed.length - missingRank} 条，缺失 ${missingRank} 条`,
+          `Sales Rank: Subcategory Sales Ranks 有效 ${parsed.length - missingRank} 条，缺失 ${missingRank} 条`,
           `New: Current 为空 ${missingNewCurrent} 条，${target === 'today' ? '今日新增丢失' : '昨日丢失'} ${nextBoard.lost.length} 条`,
           `缺少价格 ${missingPrice} 条${target === 'today' ? `，今日恢复 ${nextBoard.recovered.length} 条` : ''}`,
         ],
@@ -1619,7 +1541,7 @@ function App() {
             <div className="section-heading"><h2>检索结果</h2><span>{filteredRows.length} 条</span></div>
             <div className="data-table-wrap">
               <table className="data-table">
-                <thead><tr><th>运营</th><th>SKU</th><th>类型</th><th>品牌</th><th>ASIN</th><th>归类规则</th><th>价格</th><th>今日排名</th><th>昨日排名</th></tr></thead>
+                <thead><tr>{renderResultHeader('owner', '运营')}{renderResultHeader('sku', 'SKU')}{renderResultHeader('asinType', '类型')}{renderResultHeader('brand', '品牌')}{renderResultHeader('asin', 'ASIN')}{renderResultHeader('price', '价格')}{renderResultHeader('todayRank', '今日排名')}{renderResultHeader('yesterdayRank', '昨日排名')}</tr></thead>
                 <tbody>{visibleRows.map((row, index) => {
                   const previous = visibleRows[index - 1]
                   const next = visibleRows[index + 1]
@@ -1628,7 +1550,7 @@ function App() {
                   const typeClass = normalized(row.asinType).includes('kmasin') ? 'type-km' : normalized(row.asinType).includes('竞对') ? 'type-competitor' : 'type-neutral'
                   const asinHistory = historyByAsin.get(normalized(row.asin))
                   const priceChange = getMetricChange(asinHistory, 'price')
-                  return <tr className={`${row.asin === selectedAsin ? 'selected-row' : ''} ${isGroupStart ? 'sku-group-start' : ''} ${isGroupEnd ? 'sku-group-end' : ''}`} key={`${row.sku}-${row.asin}`} onClick={() => setSelectedAsin(row.asin)}><td>{row.owner || '-'}</td><td className="sku-cell">{row.sku}</td><td><span className={`type-tag ${typeClass}`}>{row.asinType || '-'}</span></td><td>{row.keepa?.brand || '-'}</td><td className="asin-cell">{row.asin}</td><td><span className="rule-badge">{row.ruleSource}</span></td><td>{renderMetric(row.keepa?.price, priceChange, 'price')}</td><td>{typeof row.keepa?.rank === 'number' ? row.keepa.rank.toLocaleString() : '-'}</td><td>{typeof row.yesterdayKeepa?.rank === 'number' ? row.yesterdayKeepa.rank.toLocaleString() : '-'}</td></tr>
+                  return <tr className={`${row.asin === selectedAsin ? 'selected-row' : ''} ${isGroupStart ? 'sku-group-start' : ''} ${isGroupEnd ? 'sku-group-end' : ''}`} key={`${row.sku}-${row.asin}-${index}`} onClick={() => setSelectedAsin(row.asin)}><td>{row.owner || '-'}</td><td className="sku-cell">{row.sku}</td><td><span className={`type-tag ${typeClass}`}>{row.asinType || '-'}</span></td><td>{row.keepa?.brand || '-'}</td><td className="asin-cell">{row.asin}</td><td>{renderMetric(row.keepa?.price, priceChange, 'price')}</td><td>{renderRankComparison(row.keepa?.rank, row.yesterdayKeepa?.rank)}</td><td>{typeof row.yesterdayKeepa?.rank === 'number' ? row.yesterdayKeepa.rank.toLocaleString() : '-'}</td></tr>
                 })}</tbody>
               </table>
             </div>
@@ -1637,40 +1559,6 @@ function App() {
           <div className="detail-panel">
             <div className="section-heading"><h2>ASIN 详情</h2><span>{selectedAsin || '未选择'}</span></div>
             {selectedRows[0] ? <div className="detail-stack"><div><span className="eyebrow">商品</span><h3>{selectedRows[0].keepa?.title || selectedRows[0].asin}</h3></div>{getPrimaryImageUrl(selectedRows[0].keepa?.image) ? <div className="detail-image-wrap"><img alt={selectedRows[0].asin} className="detail-image" src={getPrimaryImageUrl(selectedRows[0].keepa?.image)} /></div> : null}<dl className="detail-list"><div><dt>运营</dt><dd>{selectedRows[0].owner || '-'}</dd></div><div><dt>SKU</dt><dd>{selectedRows[0].sku}</dd></div><div><dt>品牌</dt><dd>{selectedRows[0].keepa?.brand || '-'}</dd></div><div><dt>归类规则</dt><dd>{selectedRows[0].ruleSource}</dd></div><div><dt>New: Current</dt><dd>{typeof selectedRows[0].keepa?.newCurrent === 'number' ? selectedRows[0].keepa.newCurrent.toFixed(2) : '-'}</dd></div><div><dt>Coupon</dt><dd>{selectedRows[0].keepa?.coupon || '-'}</dd></div></dl></div> : <p className="empty-state">点击左侧结果查看 ASIN。</p>}
-          </div>
-        </section>
-
-        <section className="price-focus-panel">
-          <div className="section-heading"><h2>价格异常看板</h2><span>{priceAlertRows.length} 条竞对变化</span><button className="action-pill" type="button" onClick={() => exportBoardItems('价格异常', priceAlertRows)}>下载表格</button></div>
-          <div className="price-filter-grid">
-            <div className="search-box"><input list="owner-options" placeholder="筛选运营" value={priceViewOwner} onChange={(event) => setPriceViewOwner(event.target.value)} /></div>
-            <div className="search-box"><input list="sku-options" placeholder="筛选 SKU" value={priceViewSku} onChange={(event) => setPriceViewSku(event.target.value)} /></div>
-            <div className="search-box"><input placeholder="筛选品类/类型" value={priceViewCategory} onChange={(event) => setPriceViewCategory(event.target.value)} /></div>
-          </div>
-          <div className="price-chart-wrap">
-            <ResponsiveContainer height={260} width="100%">
-              <RechartsBarChart data={priceAlertRows.slice().sort((a, b) => (b.changePct ?? 0) - (a.changePct ?? 0)).slice(0, 15)}>
-                <CartesianGrid stroke="#e6ebf2" vertical={false} />
-                <XAxis dataKey="asin" tickLine={false} interval={0} angle={-18} textAnchor="end" height={62} />
-                <YAxis tickLine={false} />
-                <Tooltip formatter={(value) => typeof value === 'number' ? `${value > 0 ? '+' : ''}${value.toFixed(2)}` : String(value ?? '')} labelFormatter={(label) => {
-                  const row = priceAlertRows.find((item) => item.asin === label)
-                  return row ? `竞对ASIN: ${label} | 运营: ${row.owner || '-'} | SKU: ${row.kmSku || row.sku || '-'} | 类型: ${row.category || '-'}` : `竞对ASIN: ${label}`
-                }} />
-                <Bar dataKey="delta" fill="#d97706" radius={[4, 4, 0, 0]} />
-              </RechartsBarChart>
-            </ResponsiveContainer>
-          </div>
-          <div className="mini-table-wrap">
-            <table className="data-table mini-table">
-              <thead><tr><th>运营</th><th>SKU</th><th>类型</th><th>ASIN</th><th><div className="sort-menu-wrap"><button className="table-sort" type="button" onClick={() => setPriceSortMenu((current) => current === 'price' ? null : 'price')}>价格 <ArrowUpDown size={13} /></button>{priceSortMenu === 'price' ? <div className="sort-menu"><button type="button" onClick={() => { setPriceSortBy('price-diff-desc'); setPriceSortMenu(null) }}>价格变动最大</button><button type="button" onClick={() => { setPriceSortBy('price-diff-asc'); setPriceSortMenu(null) }}>价格变动最小</button></div> : null}</div></th><th><div className="sort-menu-wrap"><button className="table-sort" type="button" onClick={() => setPriceSortMenu((current) => current === 'rank' ? null : 'rank')}>排名 <ArrowUpDown size={13} /></button>{priceSortMenu === 'rank' ? <div className="sort-menu"><button type="button" onClick={() => { setPriceSortBy('rank-diff-desc'); setPriceSortMenu(null) }}>排名差异最大</button><button type="button" onClick={() => { setPriceSortBy('rank-diff-asc'); setPriceSortMenu(null) }}>排名差异最小</button></div> : null}</div></th></tr></thead>
-              <tbody>{priceBoardGroups.slice(0, 20).flatMap((group) => {
-                const head = group[0]
-                const kmRow = <tr className="price-parent-row" key={`km-${head.kmAsin}`}><td>{head.owner || '-'}</td><td>{head.kmSku || '-'}</td><td><span className="type-tag type-km">KMASIN</span></td><td>{head.kmAsin || '-'}</td><td>{typeof head.kmPrice === 'number' ? `$${head.kmPrice.toFixed(2)}` : '-'}</td><td>{typeof head.kmRank === 'number' ? head.kmRank.toLocaleString() : '-'}</td></tr>
-                const children = group.map((item) => <tr key={item.id}><td>{item.owner || '-'}</td><td>{item.kmSku || item.sku || '-'}</td><td><span className="type-tag type-competitor">竞对ASIN</span></td><td>{item.asin || '-'}</td><td>{renderBoardPriceMetric(item.current, item.delta, item.changePct)}</td><td>{renderBoardRankMetric(item.currentRank, item.rankDelta, item.previousRank)}</td></tr>)
-                return [kmRow, ...children]
-              })}</tbody>
-            </table>
           </div>
         </section>
 
