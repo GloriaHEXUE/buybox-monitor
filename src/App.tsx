@@ -11,7 +11,6 @@ import {
   Edit3,
   FileSpreadsheet,
   Plus,
-  RotateCcw,
   Save,
   Search,
   Trash2,
@@ -68,6 +67,8 @@ type KeepaRow = {
   image: string
 }
 
+type KeepaSnapshotRow = Pick<KeepaRow, 'asin' | 'newCurrent' | 'rank'>
+
 type HistoryPoint = {
   date: string
   asin: string
@@ -100,6 +101,17 @@ type UploadSummary = {
   notes: string[]
   errors: string[]
 }
+
+type KeepaUploadReport = {
+  status: 'idle' | 'processing' | 'success' | 'error'
+  fileName: string
+  date: string
+  imported: number
+  notes: string[]
+  errors: string[]
+}
+
+type KeepaUploadReports = Record<'yesterday' | 'today', KeepaUploadReport>
 
 type AlertItem = {
   id: string
@@ -158,12 +170,13 @@ type BuyBoxDayBoard = {
 
 type StoredState = {
   keepaRows: KeepaRow[]
-  yesterdayKeepaRows: KeepaRow[]
+  yesterdayKeepaRows: KeepaSnapshotRow[]
   mappingRows: MappingRow[]
   monitorRows: MonitorRow[]
   history: HistoryPoint[]
   todayBuyBox: BuyBoxDayBoard
   yesterdayBuyBox: BuyBoxDayBoard
+  keepaUploadReports: KeepaUploadReports
 }
 
 const typedSeed = seedData as unknown as {
@@ -376,6 +389,16 @@ const normalizeKeepaRows = (rows: KeepaRow[] | undefined) =>
     newCurrent: typeof row.newCurrent === 'number' && Number.isFinite(row.newCurrent) ? row.newCurrent : null,
   }))
 
+const toKeepaSnapshotRows = (rows: Array<KeepaRow | KeepaSnapshotRow> | undefined): KeepaSnapshotRow[] =>
+  (rows ?? []).map((row) => ({
+    asin: String(row.asin ?? '').trim(),
+    newCurrent: typeof row.newCurrent === 'number' && Number.isFinite(row.newCurrent) ? row.newCurrent : null,
+    rank: typeof row.rank === 'number' && Number.isFinite(row.rank) ? row.rank : null,
+  })).filter((row) => row.asin)
+
+const compactKeepaRowsForStorage = (rows: KeepaRow[]): KeepaRow[] =>
+  rows.map((row) => ({ ...row, image: '' }))
+
 const normalizeBuyBoxBoard = (board: BuyBoxDayBoard | undefined): BuyBoxDayBoard => ({
   date: String(board?.date ?? ''),
   lost: Array.isArray(board?.lost) ? board.lost : [],
@@ -390,8 +413,8 @@ const getImportDate = (fileName: string) => {
 const buildBuyBoxBoard = (
   monitorRows: MonitorRow[],
   mappingRows: MappingRow[],
-  currentRows: KeepaRow[],
-  previousRows: KeepaRow[],
+  currentRows: Array<KeepaRow | KeepaSnapshotRow>,
+  previousRows: Array<KeepaRow | KeepaSnapshotRow>,
   date: string,
 ): BuyBoxDayBoard => {
   const currentByAsin = new Map(currentRows.map((row) => [normalized(row.asin), row.newCurrent]))
@@ -507,23 +530,29 @@ const loadInitialState = (): StoredState => {
     history: initialHistory(seedKeepaRows),
     todayBuyBox: emptyBuyBoxBoard(),
     yesterdayBuyBox: emptyBuyBoxBoard(),
+    keepaUploadReports: emptyKeepaUploadReports(),
   }
   try {
     const raw = localStorage.getItem(storageKey)
     if (!raw) return fallback
-    const stored = JSON.parse(raw) as StoredState
+    const stored = JSON.parse(raw) as Partial<StoredState>
+    const storedKeepaRows = normalizeKeepaRows(stored.keepaRows)
     return {
-      keepaRows: normalizeKeepaRows(stored.keepaRows),
+      keepaRows: storedKeepaRows,
       yesterdayKeepaRows: stored.yesterdayKeepaRows
-        ? normalizeKeepaRows(stored.yesterdayKeepaRows)
+        ? toKeepaSnapshotRows(stored.yesterdayKeepaRows)
         : stored.yesterdayBuyBox?.date && !stored.todayBuyBox?.date
-          ? normalizeKeepaRows(stored.keepaRows)
+          ? toKeepaSnapshotRows(stored.keepaRows)
           : [],
       mappingRows: stored.mappingRows ?? fallback.mappingRows,
       monitorRows: stored.monitorRows ?? fallback.monitorRows,
-      history: keepRecentFiveDays(stored.history ?? []),
+      history: stored.history?.length ? keepRecentFiveDays(stored.history) : initialHistory(storedKeepaRows),
       todayBuyBox: normalizeBuyBoxBoard(stored.todayBuyBox),
       yesterdayBuyBox: normalizeBuyBoxBoard(stored.yesterdayBuyBox),
+      keepaUploadReports: {
+        yesterday: normalizeKeepaUploadReport(stored.keepaUploadReports?.yesterday),
+        today: normalizeKeepaUploadReport(stored.keepaUploadReports?.today),
+      },
     }
   } catch {
     return fallback
@@ -556,6 +585,29 @@ const emptyUploadSummary: UploadSummary = {
   notes: [],
   errors: [],
 }
+
+const emptyKeepaUploadReport = (): KeepaUploadReport => ({
+  status: 'idle',
+  fileName: '',
+  date: '',
+  imported: 0,
+  notes: [],
+  errors: [],
+})
+
+const emptyKeepaUploadReports = (): KeepaUploadReports => ({
+  yesterday: emptyKeepaUploadReport(),
+  today: emptyKeepaUploadReport(),
+})
+
+const normalizeKeepaUploadReport = (report: KeepaUploadReport | undefined): KeepaUploadReport => ({
+  status: report?.status ?? 'idle',
+  fileName: String(report?.fileName ?? ''),
+  date: String(report?.date ?? ''),
+  imported: Number.isFinite(report?.imported) ? Number(report?.imported) : 0,
+  notes: Array.isArray(report?.notes) ? report.notes : [],
+  errors: Array.isArray(report?.errors) ? report.errors : [],
+})
 
 const downloadTemplate = (kind: UploadKind) => {
   const headers = kind === 'monitor' ? monitorHeaders : kind === 'mapping' ? mappingHeaders : keepaHeaders
@@ -697,7 +749,7 @@ const BuyBoxStatusSection = ({
 function App() {
   const initialState = useMemo(loadInitialState, [])
   const [keepaRows, setKeepaRows] = useState<KeepaRow[]>(initialState.keepaRows)
-  const [yesterdayKeepaRows, setYesterdayKeepaRows] = useState<KeepaRow[]>(initialState.yesterdayKeepaRows)
+  const [yesterdayKeepaRows, setYesterdayKeepaRows] = useState<KeepaSnapshotRow[]>(initialState.yesterdayKeepaRows)
   const [mappingRows, setMappingRows] = useState<MappingRow[]>(initialState.mappingRows)
   const [monitorRows, setMonitorRows] = useState<MonitorRow[]>(initialState.monitorRows)
   const [history, setHistory] = useState<HistoryPoint[]>(initialState.history)
@@ -717,6 +769,7 @@ function App() {
   const [monitorForm, setMonitorForm] = useState<MonitorRow>(emptyMonitor)
   const [mappingForm, setMappingForm] = useState<MappingRow>(emptyMapping)
   const [uploadSummary, setUploadSummary] = useState<UploadSummary>(emptyUploadSummary)
+  const [keepaUploadReports, setKeepaUploadReports] = useState<KeepaUploadReports>(initialState.keepaUploadReports)
   const [collapsedAlerts, setCollapsedAlerts] = useState<Record<string, boolean>>({})
   const [priceViewOwner, setPriceViewOwner] = useState('')
   const [priceViewSku, setPriceViewSku] = useState('')
@@ -729,9 +782,22 @@ function App() {
   )
 
   useEffect(() => {
-    const payload: StoredState = { keepaRows, yesterdayKeepaRows, mappingRows, monitorRows, history, todayBuyBox, yesterdayBuyBox }
-    localStorage.setItem(storageKey, JSON.stringify(payload))
-  }, [history, keepaRows, mappingRows, monitorRows, todayBuyBox, yesterdayBuyBox, yesterdayKeepaRows])
+    const payload: StoredState = {
+      keepaRows: compactKeepaRowsForStorage(keepaRows),
+      yesterdayKeepaRows,
+      mappingRows,
+      monitorRows,
+      history: [],
+      todayBuyBox,
+      yesterdayBuyBox,
+      keepaUploadReports,
+    }
+    try {
+      localStorage.setItem(storageKey, JSON.stringify(payload))
+    } catch {
+      setStatus('数据已在当前页面完成解析，但浏览器存储空间不足，刷新后可能无法保留。请先使用一键清空再重新上传。')
+    }
+  }, [keepaRows, keepaUploadReports, mappingRows, monitorRows, todayBuyBox, yesterdayBuyBox, yesterdayKeepaRows])
 
   useEffect(() => {
     if (!pendingKeepaUpload) return undefined
@@ -743,12 +809,17 @@ function App() {
   }, [pendingKeepaUpload])
 
   const keepaByAsin = useMemo(() => new Map(keepaRows.map((row) => [normalized(row.asin), row])), [keepaRows])
+  const yesterdayKeepaByAsin = useMemo(
+    () => new Map(yesterdayKeepaRows.map((row) => [normalized(row.asin), row])),
+    [yesterdayKeepaRows],
+  )
   const mappingBySku = useMemo(() => new Map(mappingRows.map((row) => [normalized(row.sku), row])), [mappingRows])
 
   const enrichedRows = useMemo(
     () =>
       monitorRows.map((row) => {
         const keepa = keepaByAsin.get(normalized(row.asin))
+        const yesterdayKeepa = yesterdayKeepaByAsin.get(normalized(row.asin))
         const mapping = mappingBySku.get(normalized(row.sku))
         const ruleMatch = getRuleMatch(row, mapping, keepa)
         return {
@@ -758,10 +829,11 @@ function App() {
           account: ruleMatch.account,
           ruleSource: ruleMatch.source,
           keepa,
+          yesterdayKeepa,
           hasMapping: Boolean(mapping),
         }
       }),
-    [keepaByAsin, mappingBySku, monitorRows],
+    [keepaByAsin, mappingBySku, monitorRows, yesterdayKeepaByAsin],
   )
 
   const filteredRows = useMemo(() => {
@@ -1229,6 +1301,17 @@ function App() {
     target: 'today' | 'yesterday',
   ) => {
     setStatus(`正在解析 ${file.name} ...`)
+    setKeepaUploadReports((current) => ({
+      ...current,
+      [target]: {
+        status: 'processing',
+        fileName: file.name,
+        date: getImportDate(file.name),
+        imported: 0,
+        notes: ['正在读取并校验 ASIN、New: Current、Sales Rank: Current 字段。'],
+        errors: [],
+      },
+    }))
     try {
       const rows = await readKeepaRows(file)
       const parsed = parseKeepa(rows)
@@ -1238,45 +1321,57 @@ function App() {
       const previousRows = target === 'today' ? yesterdayKeepaRows : []
       const nextBoard = buildBuyBoxBoard(monitorRows, mappingRows, parsed, previousRows, date)
       if (target === 'yesterday') {
-        setYesterdayKeepaRows(parsed)
+        setYesterdayKeepaRows(toKeepaSnapshotRows(parsed))
         setYesterdayBuyBox(nextBoard)
         setTodayBuyBox(emptyBuyBoxBoard())
+        setKeepaRows([])
+        setHistory(mergeRecentHistory([], parsed, date))
       } else {
         setTodayBuyBox(nextBoard)
+        setKeepaRows(parsed)
+        setHistory((current) => mergeRecentHistory(current, parsed, date))
       }
-      setKeepaRows(parsed)
-      setHistory((current) => mergeRecentHistory(current, parsed, date))
 
       const missingPrice = parsed.filter((row) => row.price === null).length
       const missingRank = parsed.filter((row) => row.rank === null).length
       const missingNewCurrent = parsed.filter((row) => row.newCurrent === null).length
-      setUploadSummary({
-        kind: 'keepa',
+      const successReport: KeepaUploadReport = {
+        status: 'success',
         fileName: file.name,
+        date,
         imported: parsed.length,
         notes: [
           `识别到 ${parsed.length} 条 ASIN`,
-          `New: Current 为空 ${missingNewCurrent} 条`,
-          `${target === 'yesterday' ? '昨日基准' : '今日'} Buy Box 丢失 ${nextBoard.lost.length} 条`,
-          `${target === 'yesterday' ? '昨日基准' : '今日'} Buy Box 恢复 ${target === 'yesterday' ? 0 : nextBoard.recovered.length} 条`,
-          `缺少价格 ${missingPrice} 条、缺少排名 ${missingRank} 条`,
+          `Sales Rank: Current 有效 ${parsed.length - missingRank} 条，缺失 ${missingRank} 条`,
+          `New: Current 为空 ${missingNewCurrent} 条，Buy Box 丢失 ${nextBoard.lost.length} 条`,
+          `缺少价格 ${missingPrice} 条${target === 'today' ? `，Buy Box 恢复 ${nextBoard.recovered.length} 条` : ''}`,
         ],
         errors: [],
-      })
+      }
+      setKeepaUploadReports((current) => ({
+        ...current,
+        ...(target === 'yesterday' ? { today: emptyKeepaUploadReport() } : {}),
+        [target]: successReport,
+      }))
       setStatus(
         target === 'yesterday'
           ? `已将 ${parsed.length} 条 Keepa 数据保存为昨日基准：丢失 ${nextBoard.lost.length} 条。`
           : `已导入 ${parsed.length} 条 Keepa 数据：今日丢失 ${nextBoard.lost.length} 条，恢复 ${nextBoard.recovered.length} 条。`,
       )
     } catch (error) {
-      setUploadSummary({
-        kind: 'keepa',
-        fileName: file.name,
-        imported: 0,
-        notes: [],
-        errors: [error instanceof Error ? error.message : 'Keepa 文件解析失败，请检查导出字段。'],
-      })
-      setStatus(error instanceof Error ? error.message : 'Keepa 文件解析失败，请检查导出字段。')
+      const message = error instanceof Error ? error.message : 'Keepa 文件解析失败，请检查导出字段。'
+      setKeepaUploadReports((current) => ({
+        ...current,
+        [target]: {
+          status: 'error',
+          fileName: file.name,
+          date: getImportDate(file.name),
+          imported: 0,
+          notes: ['本次上传未写入，原有数据未改变。'],
+          errors: [message],
+        },
+      }))
+      setStatus(message)
     }
   }
 
@@ -1335,19 +1430,16 @@ function App() {
     setStatus('已取消本次 Keepa 上传，当前今日和昨日数据未改变。')
   }
 
-  const resetToSeed = () => {
-    const seedKeepaRows = normalizeKeepaRows(typedSeed.keepaRows)
-    setKeepaRows(seedKeepaRows)
+  const clearKeepaData = () => {
+    setKeepaRows([])
     setYesterdayKeepaRows([])
-    setMappingRows(typedSeed.mappingRows)
-    setMonitorRows(typedSeed.monitorRows)
-    setHistory(keepRecentFiveDays(initialHistory(seedKeepaRows)))
+    setHistory([])
     setTodayBuyBox(emptyBuyBoxBoard())
     setYesterdayBuyBox(emptyBuyBoxBoard())
+    setKeepaUploadReports(emptyKeepaUploadReports())
     setPendingKeepaUpload(null)
-    setSelectedAsin(typedSeed.monitorRows[0]?.asin ?? '')
-    setEditingIndex(null)
-    setStatus('已恢复为原 Excel 自动提取的数据。')
+    setUploadSummary((current) => current.kind === 'keepa' ? emptyUploadSummary : current)
+    setStatus('已清空昨日和今日 Keepa 数据，可重新上传两份数据源。SKU 监控清单和映射信息保持不变。')
   }
 
   const startEdit = (index: number) => {
@@ -1438,7 +1530,7 @@ function App() {
           <label>排名下滑 ≥ {rankAlert}%<input max="200" min="5" step="5" type="range" value={rankAlert} onChange={(event) => setRankAlert(Number(event.target.value))} /></label>
         </section>
 
-        <button className="reset-button" type="button" onClick={resetToSeed}><RotateCcw size={16} />恢复原表数据</button>
+        <button className="reset-button" title="清空昨日和今日 Keepa 数据" type="button" onClick={clearKeepaData}><Trash2 size={16} />一键清空</button>
         <section className="nav-panel">
           <button className={maintenancePanel === 'monitor' ? 'active-nav' : ''} type="button" onClick={() => { setEditMode('monitor'); setMaintenancePanel((current) => current === 'monitor' ? null : 'monitor'); startAdd() }}>SKU 监控清单</button>
           <button className={maintenancePanel === 'mapping' ? 'active-nav' : ''} type="button" onClick={() => { setEditMode('mapping'); setMaintenancePanel((current) => current === 'mapping' ? null : 'mapping'); startAdd() }}>映射信息</button>
@@ -1461,19 +1553,29 @@ function App() {
         <section className="sidebar-info-panel">
           <div className="panel-title"><Upload size={16} />上传后说明</div>
           <div className="sidebar-upload-summary">
-            <div className="sidebar-upload-count">
-              <span>本次导入</span>
-              <strong>{uploadSummary.imported}</strong>
-              <p>{uploadSummary.fileName ? `${uploadLabels[uploadSummary.kind]} · ${uploadSummary.fileName}` : '等待上传文件'}</p>
-            </div>
-            <div className="sidebar-upload-block">
-              <span>解析说明</span>
-              {uploadSummary.notes.length ? <ul className="report-list compact-report-list">{uploadSummary.notes.map((note) => <li key={note}>{note}</li>)}</ul> : <p>上传后会在这里显示识别结果。</p>}
-            </div>
-            <div className="sidebar-upload-block">
-              <span>报错说明</span>
-              {uploadSummary.errors.length ? <ul className="report-list report-error compact-report-list">{uploadSummary.errors.map((error) => <li key={error}>{error}</li>)}</ul> : <p>当前没有上传报错。</p>}
-            </div>
+            {([
+              ['yesterday', '昨日数据源'],
+              ['today', '今日数据源'],
+            ] as const).map(([key, label]) => {
+              const report = keepaUploadReports[key]
+              const statusLabel = report.status === 'success' ? '上传成功' : report.status === 'error' ? '上传失败' : report.status === 'processing' ? '解析中' : '等待上传'
+              return (
+                <section className={`sidebar-upload-role upload-role-${report.status}`} key={key}>
+                  <div className="sidebar-upload-role-heading"><strong>{label}</strong><span>{statusLabel}</span></div>
+                  <p>{report.fileName || '尚未选择文件'}</p>
+                  {report.status === 'success' ? <p>{report.date} · 已解析 {report.imported.toLocaleString()} 条</p> : null}
+                  {report.notes.length ? <ul className="report-list compact-report-list">{report.notes.map((note) => <li key={note}>{note}</li>)}</ul> : null}
+                  {report.errors.length ? <ul className="report-list report-error compact-report-list">{report.errors.map((error) => <li key={error}>{error}</li>)}</ul> : null}
+                </section>
+              )
+            })}
+            {uploadSummary.fileName && uploadSummary.kind !== 'keepa' ? (
+              <div className="sidebar-upload-block">
+                <span>其他文件</span>
+                <p>{uploadLabels[uploadSummary.kind]} · {uploadSummary.fileName} · {uploadSummary.imported.toLocaleString()} 条</p>
+                {uploadSummary.errors.length ? <ul className="report-list report-error compact-report-list">{uploadSummary.errors.map((error) => <li key={error}>{error}</li>)}</ul> : null}
+              </div>
+            ) : null}
           </div>
         </section>
       </aside>
@@ -1500,7 +1602,7 @@ function App() {
             <div className="section-heading"><h2>检索结果</h2><span>{filteredRows.length} 条</span></div>
             <div className="data-table-wrap">
               <table className="data-table">
-                <thead><tr><th>运营</th><th>SKU</th><th>类型</th><th>品牌</th><th>ASIN</th><th>归类规则</th><th>价格</th><th>排名</th></tr></thead>
+                <thead><tr><th>运营</th><th>SKU</th><th>类型</th><th>品牌</th><th>ASIN</th><th>归类规则</th><th>价格</th><th>今日排名</th><th>昨日排名</th></tr></thead>
                 <tbody>{visibleRows.map((row, index) => {
                   const previous = visibleRows[index - 1]
                   const next = visibleRows[index + 1]
@@ -1509,8 +1611,7 @@ function App() {
                   const typeClass = normalized(row.asinType).includes('kmasin') ? 'type-km' : normalized(row.asinType).includes('竞对') ? 'type-competitor' : 'type-neutral'
                   const asinHistory = historyByAsin.get(normalized(row.asin))
                   const priceChange = getMetricChange(asinHistory, 'price')
-                  const rankChange = getMetricChange(asinHistory, 'rank')
-                  return <tr className={`${row.asin === selectedAsin ? 'selected-row' : ''} ${isGroupStart ? 'sku-group-start' : ''} ${isGroupEnd ? 'sku-group-end' : ''}`} key={`${row.sku}-${row.asin}`} onClick={() => setSelectedAsin(row.asin)}><td>{row.owner || '-'}</td><td className="sku-cell">{row.sku}</td><td><span className={`type-tag ${typeClass}`}>{row.asinType || '-'}</span></td><td>{row.keepa?.brand || '-'}</td><td className="asin-cell">{row.asin}</td><td><span className="rule-badge">{row.ruleSource}</span></td><td>{renderMetric(row.keepa?.price, priceChange, 'price')}</td><td>{renderMetric(row.keepa?.rank, rankChange, 'rank')}</td></tr>
+                  return <tr className={`${row.asin === selectedAsin ? 'selected-row' : ''} ${isGroupStart ? 'sku-group-start' : ''} ${isGroupEnd ? 'sku-group-end' : ''}`} key={`${row.sku}-${row.asin}`} onClick={() => setSelectedAsin(row.asin)}><td>{row.owner || '-'}</td><td className="sku-cell">{row.sku}</td><td><span className={`type-tag ${typeClass}`}>{row.asinType || '-'}</span></td><td>{row.keepa?.brand || '-'}</td><td className="asin-cell">{row.asin}</td><td><span className="rule-badge">{row.ruleSource}</span></td><td>{renderMetric(row.keepa?.price, priceChange, 'price')}</td><td>{typeof row.keepa?.rank === 'number' ? row.keepa.rank.toLocaleString() : '-'}</td><td>{typeof row.yesterdayKeepa?.rank === 'number' ? row.yesterdayKeepa.rank.toLocaleString() : '-'}</td></tr>
                 })}</tbody>
               </table>
             </div>
