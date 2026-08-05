@@ -148,7 +148,6 @@ type BuyBoxStatusItem = {
 
 type PendingKeepaUpload = {
   file: File
-  mode: 'initial' | 'from-yesterday' | 'daily'
 }
 
 type BuyBoxDayBoard = {
@@ -159,6 +158,7 @@ type BuyBoxDayBoard = {
 
 type StoredState = {
   keepaRows: KeepaRow[]
+  yesterdayKeepaRows: KeepaRow[]
   mappingRows: MappingRow[]
   monitorRows: MonitorRow[]
   history: HistoryPoint[]
@@ -501,6 +501,7 @@ const loadInitialState = (): StoredState => {
   const seedKeepaRows = normalizeKeepaRows(typedSeed.keepaRows)
   const fallback = {
     keepaRows: seedKeepaRows,
+    yesterdayKeepaRows: [],
     mappingRows: typedSeed.mappingRows,
     monitorRows: typedSeed.monitorRows,
     history: initialHistory(seedKeepaRows),
@@ -513,6 +514,11 @@ const loadInitialState = (): StoredState => {
     const stored = JSON.parse(raw) as StoredState
     return {
       keepaRows: normalizeKeepaRows(stored.keepaRows),
+      yesterdayKeepaRows: stored.yesterdayKeepaRows
+        ? normalizeKeepaRows(stored.yesterdayKeepaRows)
+        : stored.yesterdayBuyBox?.date && !stored.todayBuyBox?.date
+          ? normalizeKeepaRows(stored.keepaRows)
+          : [],
       mappingRows: stored.mappingRows ?? fallback.mappingRows,
       monitorRows: stored.monitorRows ?? fallback.monitorRows,
       history: keepRecentFiveDays(stored.history ?? []),
@@ -691,6 +697,7 @@ const BuyBoxStatusSection = ({
 function App() {
   const initialState = useMemo(loadInitialState, [])
   const [keepaRows, setKeepaRows] = useState<KeepaRow[]>(initialState.keepaRows)
+  const [yesterdayKeepaRows, setYesterdayKeepaRows] = useState<KeepaRow[]>(initialState.yesterdayKeepaRows)
   const [mappingRows, setMappingRows] = useState<MappingRow[]>(initialState.mappingRows)
   const [monitorRows, setMonitorRows] = useState<MonitorRow[]>(initialState.monitorRows)
   const [history, setHistory] = useState<HistoryPoint[]>(initialState.history)
@@ -722,9 +729,9 @@ function App() {
   )
 
   useEffect(() => {
-    const payload: StoredState = { keepaRows, mappingRows, monitorRows, history, todayBuyBox, yesterdayBuyBox }
+    const payload: StoredState = { keepaRows, yesterdayKeepaRows, mappingRows, monitorRows, history, todayBuyBox, yesterdayBuyBox }
     localStorage.setItem(storageKey, JSON.stringify(payload))
-  }, [history, keepaRows, mappingRows, monitorRows, todayBuyBox, yesterdayBuyBox])
+  }, [history, keepaRows, mappingRows, monitorRows, todayBuyBox, yesterdayBuyBox, yesterdayKeepaRows])
 
   useEffect(() => {
     if (!pendingKeepaUpload) return undefined
@@ -860,11 +867,6 @@ function App() {
   }, [history])
 
   const editableRows = editMode === 'monitor' ? monitorRows : mappingRows
-  const hasCurrentBuyBoxSnapshot = useMemo(
-    () => Boolean(todayBuyBox.date || yesterdayBuyBox.date),
-    [todayBuyBox.date, yesterdayBuyBox.date],
-  )
-
   const alertGroups = useMemo(() => {
     const missingMapping: AlertItem[] = []
     const missingKeepa: AlertItem[] = []
@@ -1225,7 +1227,6 @@ function App() {
   const importKeepaFile = async (
     file: File,
     target: 'today' | 'yesterday',
-    archiveCurrent = false,
   ) => {
     setStatus(`正在解析 ${file.name} ...`)
     try {
@@ -1234,14 +1235,13 @@ function App() {
       if (!parsed.length) throw new Error('Keepa 文件没有识别到有效 ASIN，请检查文件内容。')
 
       const date = getImportDate(file.name)
-      const previousRows = hasCurrentBuyBoxSnapshot ? keepaRows : []
+      const previousRows = target === 'today' ? yesterdayKeepaRows : []
       const nextBoard = buildBuyBoxBoard(monitorRows, mappingRows, parsed, previousRows, date)
       if (target === 'yesterday') {
-        const yesterdayBoard = buildBuyBoxBoard(monitorRows, mappingRows, parsed, [], date)
-        setYesterdayBuyBox(yesterdayBoard)
+        setYesterdayKeepaRows(parsed)
+        setYesterdayBuyBox(nextBoard)
         setTodayBuyBox(emptyBuyBoxBoard())
       } else {
-        if (archiveCurrent && todayBuyBox.date) setYesterdayBuyBox(todayBuyBox)
         setTodayBuyBox(nextBoard)
       }
       setKeepaRows(parsed)
@@ -1283,15 +1283,8 @@ function App() {
   const handleUpload = async (kind: UploadKind, file: File | null) => {
     if (!file) return
     if (kind === 'keepa') {
-      const mode = !hasCurrentBuyBoxSnapshot ? 'initial' : todayBuyBox.date ? 'daily' : 'from-yesterday'
-      setPendingKeepaUpload({ file, mode })
-      setStatus(
-        mode === 'initial'
-          ? '首次导入，请选择这份 Keepa 数据作为昨日基准或今日数据。'
-          : mode === 'from-yesterday'
-            ? '检测到已保存的昨日基准，请确认更新今日数据。'
-            : '检测到已有今日快照，请选择是否保存为昨日数据。',
-      )
+      setPendingKeepaUpload({ file })
+      setStatus('请选择将这份 Keepa 数据作为昨日基准或今日数据。')
       return
     }
     setStatus(`正在解析 ${file.name} ...`)
@@ -1330,11 +1323,11 @@ function App() {
     }
   }
 
-  const continueKeepaUpload = async (target: 'today' | 'yesterday', archiveCurrent = false) => {
+  const continueKeepaUpload = async (target: 'today' | 'yesterday') => {
     const pending = pendingKeepaUpload
     if (!pending) return
     setPendingKeepaUpload(null)
-    await importKeepaFile(pending.file, target, archiveCurrent)
+    await importKeepaFile(pending.file, target)
   }
 
   const cancelKeepaUpload = () => {
@@ -1345,6 +1338,7 @@ function App() {
   const resetToSeed = () => {
     const seedKeepaRows = normalizeKeepaRows(typedSeed.keepaRows)
     setKeepaRows(seedKeepaRows)
+    setYesterdayKeepaRows([])
     setMappingRows(typedSeed.mappingRows)
     setMonitorRows(typedSeed.monitorRows)
     setHistory(keepRecentFiveDays(initialHistory(seedKeepaRows)))
@@ -1640,29 +1634,14 @@ function App() {
       {pendingKeepaUpload ? (
         <div className="modal-backdrop">
           <section aria-describedby="keepa-save-description" aria-labelledby="keepa-save-title" aria-modal="true" className="save-snapshot-dialog" role="dialog">
-            <div className="dialog-heading"><Save size={20} /><div><span className="eyebrow">上传每日 Keepa 数据</span><h2 id="keepa-save-title">{pendingKeepaUpload.mode === 'initial' ? '首次导入：这份数据属于哪一天？' : pendingKeepaUpload.mode === 'from-yesterday' ? '使用昨日基准更新今日数据？' : '是否保存昨日数据？'}</h2></div></div>
+            <div className="dialog-heading"><Save size={20} /><div><span className="eyebrow">上传每日 Keepa 数据</span><h2 id="keepa-save-title">这份数据作为哪一天？</h2></div></div>
             <p id="keepa-save-description">
-              {pendingKeepaUpload.mode === 'initial'
-                ? <>当前没有可比较的历史快照。请选择将 <strong>{pendingKeepaUpload.file.name}</strong> 保存为昨日基准，或直接作为今日数据。</>
-                : pendingKeepaUpload.mode === 'from-yesterday'
-                  ? <>昨日基准 <strong>{yesterdayBuyBox.date}</strong> 已保存。导入 <strong>{pendingKeepaUpload.file.name}</strong> 后，系统将比较昨日与今日状态并生成恢复数据。</>
-                  : <>保存后，当前今日的丢失和恢复数据会固定到右侧昨日栏，再使用 <strong>{pendingKeepaUpload.file.name}</strong> 更新左侧今日栏。</>}
+              请选择 <strong>{pendingKeepaUpload.file.name}</strong> 的日期角色。作为昨日基准会替换右侧昨日数据并清空当前今日结果；作为今日数据会{yesterdayBuyBox.date ? <>与 <strong>{yesterdayBuyBox.date}</strong> 的昨日基准比较</> : '在没有昨日基准的情况下直接生成今日丢失数据'}。
             </p>
             <div className="dialog-actions">
               <button className="dialog-button dialog-button-cancel" type="button" onClick={cancelKeepaUpload}>取消上传</button>
-              {pendingKeepaUpload.mode === 'initial' ? (
-                <>
-                  <button className="dialog-button" type="button" onClick={() => void continueKeepaUpload('today')}>作为今日数据</button>
-                  <button autoFocus className="dialog-button dialog-button-primary" type="button" onClick={() => void continueKeepaUpload('yesterday')}><Save size={16} />作为昨日基准</button>
-                </>
-              ) : pendingKeepaUpload.mode === 'from-yesterday' ? (
-                <button autoFocus className="dialog-button dialog-button-primary" type="button" onClick={() => void continueKeepaUpload('today')}><Upload size={16} />更新今日数据</button>
-              ) : (
-                <>
-                  <button className="dialog-button" type="button" onClick={() => void continueKeepaUpload('today')}>不保存，继续</button>
-                  <button autoFocus className="dialog-button dialog-button-primary" type="button" onClick={() => void continueKeepaUpload('today', true)}><Save size={16} />保存昨日数据并继续</button>
-                </>
-              )}
+              <button className="dialog-button" type="button" onClick={() => void continueKeepaUpload('yesterday')}><Save size={16} />作为昨日基准</button>
+              <button autoFocus className="dialog-button dialog-button-primary" type="button" onClick={() => void continueKeepaUpload('today')}><Upload size={16} />作为今日数据</button>
             </div>
           </section>
         </div>
