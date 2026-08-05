@@ -399,12 +399,6 @@ const toKeepaSnapshotRows = (rows: Array<KeepaRow | KeepaSnapshotRow> | undefine
 const compactKeepaRowsForStorage = (rows: KeepaRow[]): KeepaRow[] =>
   rows.map((row) => ({ ...row, image: '' }))
 
-const normalizeBuyBoxBoard = (board: BuyBoxDayBoard | undefined): BuyBoxDayBoard => ({
-  date: String(board?.date ?? ''),
-  lost: Array.isArray(board?.lost) ? board.lost : [],
-  recovered: Array.isArray(board?.recovered) ? board.recovered : [],
-})
-
 const getImportDate = (fileName: string) => {
   const fileDate = fileName.match(/\d{4}-\d{2}-\d{2}/)?.[0]
   return fileDate ?? new Date().toLocaleDateString('sv-SE')
@@ -416,6 +410,7 @@ const buildBuyBoxBoard = (
   currentRows: Array<KeepaRow | KeepaSnapshotRow>,
   previousRows: Array<KeepaRow | KeepaSnapshotRow>,
   date: string,
+  mode: 'snapshot' | 'changes',
 ): BuyBoxDayBoard => {
   const currentByAsin = new Map(currentRows.map((row) => [normalized(row.asin), row.newCurrent]))
   const previousByAsin = new Map(previousRows.map((row) => [normalized(row.asin), row.newCurrent]))
@@ -425,7 +420,7 @@ const buildBuyBoxBoard = (
   const seen = new Set<string>()
 
   for (const row of monitorRows) {
-    if (!normalized(row.asinType).includes('kmasin')) continue
+    if (normalized(row.asinType) !== 'kmasin') continue
     const asinKey = normalized(row.asin)
     const itemKey = `${normalized(row.sku)}::${asinKey}`
     if (seen.has(itemKey)) continue
@@ -445,7 +440,13 @@ const buildBuyBoxBoard = (
     const previousExists = previousByAsin.has(asinKey)
     const previousNewCurrent = previousByAsin.get(asinKey)
     const wasPreviouslyLost = previousExists && (previousNewCurrent === null || previousNewCurrent === 0)
-    if (isCurrentLost) lost.push(item)
+    if (mode === 'snapshot') {
+      if (isCurrentLost) lost.push(item)
+      continue
+    }
+
+    if (!previousExists) continue
+    if (!wasPreviouslyLost && isCurrentLost) lost.push(item)
     if (wasPreviouslyLost && typeof newCurrent === 'number' && newCurrent > 0) recovered.push(item)
   }
 
@@ -537,18 +538,27 @@ const loadInitialState = (): StoredState => {
     if (!raw) return fallback
     const stored = JSON.parse(raw) as Partial<StoredState>
     const storedKeepaRows = normalizeKeepaRows(stored.keepaRows)
+    const storedYesterdayRows = stored.yesterdayKeepaRows
+      ? toKeepaSnapshotRows(stored.yesterdayKeepaRows)
+      : stored.yesterdayBuyBox?.date && !stored.todayBuyBox?.date
+        ? toKeepaSnapshotRows(stored.keepaRows)
+        : []
+    const mappingRows = stored.mappingRows ?? fallback.mappingRows
+    const monitorRows = stored.monitorRows ?? fallback.monitorRows
+    const todayDate = String(stored.todayBuyBox?.date ?? '')
+    const yesterdayDate = String(stored.yesterdayBuyBox?.date ?? '')
     return {
       keepaRows: storedKeepaRows,
-      yesterdayKeepaRows: stored.yesterdayKeepaRows
-        ? toKeepaSnapshotRows(stored.yesterdayKeepaRows)
-        : stored.yesterdayBuyBox?.date && !stored.todayBuyBox?.date
-          ? toKeepaSnapshotRows(stored.keepaRows)
-          : [],
-      mappingRows: stored.mappingRows ?? fallback.mappingRows,
-      monitorRows: stored.monitorRows ?? fallback.monitorRows,
+      yesterdayKeepaRows: storedYesterdayRows,
+      mappingRows,
+      monitorRows,
       history: stored.history?.length ? keepRecentFiveDays(stored.history) : initialHistory(storedKeepaRows),
-      todayBuyBox: normalizeBuyBoxBoard(stored.todayBuyBox),
-      yesterdayBuyBox: normalizeBuyBoxBoard(stored.yesterdayBuyBox),
+      todayBuyBox: todayDate
+        ? buildBuyBoxBoard(monitorRows, mappingRows, storedKeepaRows, storedYesterdayRows, todayDate, 'changes')
+        : emptyBuyBoxBoard(),
+      yesterdayBuyBox: yesterdayDate
+        ? buildBuyBoxBoard(monitorRows, mappingRows, storedYesterdayRows, [], yesterdayDate, 'snapshot')
+        : emptyBuyBoxBoard(),
       keepaUploadReports: {
         yesterday: normalizeKeepaUploadReport(stored.keepaUploadReports?.yesterday),
         today: normalizeKeepaUploadReport(stored.keepaUploadReports?.today),
@@ -1319,7 +1329,14 @@ function App() {
 
       const date = getImportDate(file.name)
       const previousRows = target === 'today' ? yesterdayKeepaRows : []
-      const nextBoard = buildBuyBoxBoard(monitorRows, mappingRows, parsed, previousRows, date)
+      const nextBoard = buildBuyBoxBoard(
+        monitorRows,
+        mappingRows,
+        parsed,
+        previousRows,
+        date,
+        target === 'today' ? 'changes' : 'snapshot',
+      )
       if (target === 'yesterday') {
         setYesterdayKeepaRows(toKeepaSnapshotRows(parsed))
         setYesterdayBuyBox(nextBoard)
@@ -1343,8 +1360,8 @@ function App() {
         notes: [
           `识别到 ${parsed.length} 条 ASIN`,
           `Sales Rank: Current 有效 ${parsed.length - missingRank} 条，缺失 ${missingRank} 条`,
-          `New: Current 为空 ${missingNewCurrent} 条，Buy Box 丢失 ${nextBoard.lost.length} 条`,
-          `缺少价格 ${missingPrice} 条${target === 'today' ? `，Buy Box 恢复 ${nextBoard.recovered.length} 条` : ''}`,
+          `New: Current 为空 ${missingNewCurrent} 条，${target === 'today' ? '今日新增丢失' : '昨日丢失'} ${nextBoard.lost.length} 条`,
+          `缺少价格 ${missingPrice} 条${target === 'today' ? `，今日恢复 ${nextBoard.recovered.length} 条` : ''}`,
         ],
         errors: [],
       }
@@ -1356,7 +1373,7 @@ function App() {
       setStatus(
         target === 'yesterday'
           ? `已将 ${parsed.length} 条 Keepa 数据保存为昨日基准：丢失 ${nextBoard.lost.length} 条。`
-          : `已导入 ${parsed.length} 条 Keepa 数据：今日丢失 ${nextBoard.lost.length} 条，恢复 ${nextBoard.recovered.length} 条。`,
+          : `已导入 ${parsed.length} 条 Keepa 数据：今日新增丢失 ${nextBoard.lost.length} 条，恢复 ${nextBoard.recovered.length} 条。`,
       )
     } catch (error) {
       const message = error instanceof Error ? error.message : 'Keepa 文件解析失败，请检查导出字段。'
@@ -1737,7 +1754,7 @@ function App() {
           <section aria-describedby="keepa-save-description" aria-labelledby="keepa-save-title" aria-modal="true" className="save-snapshot-dialog" role="dialog">
             <div className="dialog-heading"><Save size={20} /><div><span className="eyebrow">上传每日 Keepa 数据</span><h2 id="keepa-save-title">这份数据作为哪一天？</h2></div></div>
             <p id="keepa-save-description">
-              请选择 <strong>{pendingKeepaUpload.file.name}</strong> 的日期角色。作为昨日基准会替换右侧昨日数据并清空当前今日结果；作为今日数据会{yesterdayBuyBox.date ? <>与 <strong>{yesterdayBuyBox.date}</strong> 的昨日基准比较</> : '在没有昨日基准的情况下直接生成今日丢失数据'}。
+              请选择 <strong>{pendingKeepaUpload.file.name}</strong> 的日期角色。作为昨日基准会替换右侧昨日数据并清空当前今日结果；作为今日数据会{yesterdayBuyBox.date ? <>与 <strong>{yesterdayBuyBox.date}</strong> 的昨日基准比较</> : '因没有昨日基准而无法判断今日丢失或恢复'}。
             </p>
             <div className="dialog-actions">
               <button className="dialog-button dialog-button-cancel" type="button" onClick={cancelKeepaUpload}>取消上传</button>
