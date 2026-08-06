@@ -12,6 +12,13 @@ dist
 dist-ssr
 *.local
 
+# Local business data and spreadsheet exports
+*.xlsx
+*.xls
+*.csv
+*.zip
+workbook_summary.json
+
 # Editor directories and files
 .vscode/*
 !.vscode/extensions.json
