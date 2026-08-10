@@ -1559,11 +1559,28 @@ function App() {
     setCollapsedAlerts((current) => ({ ...current, [key]: !current[key] }))
   }
 
-  const jumpToMapping = () => {
-    setMaintenancePanel('mapping')
-    setEditingIndex(null)
-    setStatus('已打开固定映射数据预览；需更新时请重新上传映射信息文件。')
+  const scrollToEditorPanel = () => {
     window.setTimeout(() => editorPanelRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' }), 80)
+  }
+
+  const openMaintenancePanel = (panel: MaintenancePanel) => {
+    if (!panel) return
+    setMaintenancePanel(panel)
+    if (panel === 'online') {
+      startOnlineAdd()
+      setStatus('已打开在线添加，可直接录入新的 SKU / ASIN 监控关系。')
+    } else if (panel === 'monitor') {
+      setEditingIndex(null)
+      setStatus('已打开 SKU / ASIN 监控清单预览，可查看或导出最新汇总。')
+    } else {
+      setEditingIndex(null)
+      setStatus('已打开固定映射数据预览；需更新时请重新上传映射信息文件。')
+    }
+    scrollToEditorPanel()
+  }
+
+  const jumpToMapping = () => {
+    openMaintenancePanel('mapping')
   }
 
   return (
@@ -1600,9 +1617,9 @@ function App() {
 
         <button className="reset-button" title="清空昨日和今日 Keepa 数据" type="button" onClick={clearKeepaData}><Trash2 size={16} />一键清空</button>
         <section className="nav-panel">
-          <button className={maintenancePanel === 'online' ? 'active-nav' : ''} type="button" onClick={() => { setMaintenancePanel((current) => current === 'online' ? null : 'online'); startOnlineAdd() }}><Plus size={15} />在线添加 <span>{onlineRows.length}</span></button>
-          <button className={maintenancePanel === 'monitor' ? 'active-nav' : ''} type="button" onClick={() => setMaintenancePanel((current) => current === 'monitor' ? null : 'monitor')}><Eye size={15} />SKU / ASIN 监控清单</button>
-          <button className={maintenancePanel === 'mapping' ? 'active-nav' : ''} type="button" onClick={() => setMaintenancePanel((current) => current === 'mapping' ? null : 'mapping')}><Eye size={15} />映射信息</button>
+          <button className={maintenancePanel === 'online' ? 'active-nav' : ''} type="button" onClick={() => openMaintenancePanel('online')}><Plus size={15} />在线添加 <span>{onlineRows.length}</span></button>
+          <button className={maintenancePanel === 'monitor' ? 'active-nav' : ''} type="button" onClick={() => openMaintenancePanel('monitor')}><Eye size={15} />SKU / ASIN 监控清单</button>
+          <button className={maintenancePanel === 'mapping' ? 'active-nav' : ''} type="button" onClick={() => openMaintenancePanel('mapping')}><Eye size={15} />映射信息</button>
         </section>
         <p className="status-text">{status}</p>
         <section className="sidebar-note-panel">
