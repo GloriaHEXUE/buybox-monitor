@@ -1,5 +1,4 @@
 ﻿import { useEffect, useMemo, useState } from 'react'
-import { useRef } from 'react'
 import {
   AlertTriangle,
   ArrowDown,
@@ -7,10 +6,10 @@ import {
   BarChart3,
   Bell,
   ChevronDown,
+  CircleX,
   Database,
   Download,
   Edit3,
-  Eye,
   FileSpreadsheet,
   Plus,
   RefreshCw,
@@ -30,6 +29,7 @@ import {
   XAxis,
   YAxis,
 } from 'recharts'
+import { useRef } from 'react'
 import * as XLSX from 'xlsx'
 import seedData from './data/seedData.json'
 import './App.css'
@@ -80,7 +80,7 @@ type HistoryPoint = {
 
 type UploadKind = 'keepa' | 'mapping' | 'monitor'
 type EditMode = 'monitor' | 'mapping'
-type MaintenancePanel = 'online' | EditMode | null
+type WorkspacePage = 'dashboard' | 'data-update' | 'buybox' | 'add-monitor'
 
 type MetricChange = {
   direction: 'up' | 'down'
@@ -132,6 +132,9 @@ type AlertItem = {
   owner?: string
   category?: string
   monitorIndexes?: number[]
+  detail?: string
+  group?: string
+  account?: string
 }
 
 type AlertGroup = {
@@ -139,18 +142,6 @@ type AlertGroup = {
   title: string
   count: number
   items: AlertItem[]
-}
-
-type RankTrendRow = {
-  asin: string
-  sku: string
-  owner: string
-  asinType: string
-  direction: 'up' | 'down'
-  startRank: number
-  endRank: number
-  days: number
-  changePct: number
 }
 
 type BuyBoxStatusItem = {
@@ -170,6 +161,8 @@ type BuyBoxDayBoard = {
   lost: BuyBoxStatusItem[]
   recovered: BuyBoxStatusItem[]
 }
+
+type ResultColumnKey = ResultFilterKey
 
 type SourceReport = {
   fileName: string
@@ -205,6 +198,19 @@ const uploadLabels: Record<UploadKind, string> = {
   keepa: '每日 Keepa 数据源',
   mapping: '映射信息',
   monitor: 'SKU / ASIN 监控清单',
+}
+
+const workspacePageLabels: Record<WorkspacePage, string> = {
+  dashboard: '运营看板',
+  'data-update': '数据更新',
+  buybox: 'Buy Box 丢失|恢复',
+  'add-monitor': '添加监控ASIN',
+}
+
+const downloadLabels: Record<UploadKind, string> = {
+  keepa: '下载 Keepa 模板',
+  mapping: '导出全部映射',
+  monitor: '下载监控包',
 }
 
 const monitorHeaders = ['运营', '组别', '账号', '平台SKU', 'Bundle主SKU', 'ASIN分类', 'ASIN', '备注']
@@ -258,26 +264,53 @@ const pick = (row: AnyRow, candidates: string[]) => {
   return ''
 }
 
-const getPrimaryImageUrl = (value: string | null | undefined) => {
+const getImageCandidates = (value: string | null | undefined) => {
   const raw = String(value ?? '').trim()
-  if (!raw) return ''
-  const first = raw
+  if (!raw) return []
+  return raw
     .split(/[\n,;|]/)
     .map((item) => item.trim())
-    .find(Boolean)
-
-  if (!first) return ''
-  if (/^https?:\/\//i.test(first)) return first
-  if (/^\/\//.test(first)) return `https:${first}`
-  if (/\.(jpg|jpeg|png|webp)/i.test(first)) return `https://m.media-amazon.com/images/I/${first.replace(/^\/+/, '')}`
-  return ''
+    .filter(Boolean)
+    .map((item) => {
+      if (/^https?:\/\//i.test(item)) return item
+      if (/^\/\//.test(item)) return `https:${item}`
+      if (/\.(jpg|jpeg|png|webp)/i.test(item)) return `https://m.media-amazon.com/images/I/${item.replace(/^\/+/, '')}`
+      return ''
+    })
+    .filter(Boolean)
 }
 
-const readWorkbookRows = async (file: File): Promise<AnyRow[]> => {
+const getPrimaryImageUrl = (value: string | null | undefined) => getImageCandidates(value)[0] || ''
+
+const readWorkbookRows = async (file: File, kind: EditMode): Promise<AnyRow[]> => {
   const buffer = await file.arrayBuffer()
-  const workbook = XLSX.read(buffer)
+  const workbook = XLSX.read(buffer, { dense: true })
   const firstSheet = workbook.Sheets[workbook.SheetNames[0]]
-  return XLSX.utils.sheet_to_json<AnyRow>(firstSheet, { defval: '' })
+  const matrix = XLSX.utils.sheet_to_json<(string | number | boolean | null)[]>(firstSheet, {
+    header: 1,
+    raw: false,
+    defval: '',
+  })
+  const candidateGroups =
+    kind === 'mapping'
+      ? [['平台SKU', 'sku'], ['系统SKU'], ['店铺别名', '账号'], ['运营', '负责人'], ['小组', '组别']]
+      : [['平台SKU', 'sku'], ['ASIN'], ['ASIN分类', '类型'], ['运营', 'owner']]
+  const normalizedRowHitCount = (row: (string | number | boolean | null)[]) => {
+    const cells = row.map((cell) => normalized(cell))
+    return candidateGroups.reduce((count, group) => {
+      const matched = group.some((candidate) => cells.some((cell) => cell === normalized(candidate) || cell.includes(normalized(candidate))))
+      return count + (matched ? 1 : 0)
+    }, 0)
+  }
+  const headerRowIndex = matrix.findIndex((row) => normalizedRowHitCount(row) >= (kind === 'mapping' ? 3 : 2))
+  if (headerRowIndex === -1) {
+    throw new Error(kind === 'mapping' ? '映射文件未识别到“平台SKU/店铺别名/运营/小组”等表头。' : '监控清单未识别到“平台SKU/ASIN/ASIN分类”等表头。')
+  }
+  const headers = (matrix[headerRowIndex] ?? []).map((cell) => String(cell ?? '').trim())
+  return matrix
+    .slice(headerRowIndex + 1)
+    .map((row) => Object.fromEntries(headers.map((header, index) => [header, row[index] ?? ''])))
+    .filter((row) => Object.values(row).some((value) => String(value ?? '').trim()))
 }
 
 const readKeepaRows = async (file: File): Promise<AnyRow[]> => {
@@ -361,7 +394,7 @@ const parseMapping = (rows: AnyRow[]): MappingRow[] =>
       sku: String(pick(row, ['平台SKU', 'SKU', 'sku']) || '').trim(),
       systemSku: String(pick(row, ['系统SKU', 'System SKU']) || '').trim(),
       owner: String(pick(row, ['运营', '负责人', 'Owner']) || '').trim(),
-      group: String(pick(row, ['小组', '组别', 'Group']) || '').trim(),
+      group: String(pick(row, ['小组', '组别', 'Group', '部门']) || '').trim(),
       account: String(pick(row, ['店铺别名', '账号', 'Account']) || '').trim(),
     }))
     .filter((row) => row.sku)
@@ -683,6 +716,83 @@ const downloadTemplate = (kind: UploadKind) => {
   XLSX.writeFile(workbook, `${uploadLabels[kind]}模板.xlsx`)
 }
 
+const exportMonitorTemplatePackage = (monitorRows: MonitorRow[], mappingRows: MappingRow[]) => {
+  const templateSheet = XLSX.utils.aoa_to_sheet([
+    monitorHeaders,
+    ['', '', '', 'KM1B0901-06205-BK', '', '竞对ASIN', 'B08CF2V57W', '填写平台SKU后可参考映射信息匹配运营/店铺/小组'],
+  ])
+  const monitorSheet = XLSX.utils.json_to_sheet(
+    monitorRows.map((row) => ({
+      运营: row.owner,
+      组别: row.group,
+      账号: row.account,
+      平台SKU: row.sku,
+      Bundle主SKU: row.bundleSku,
+      ASIN分类: row.asinType,
+      ASIN: row.asin,
+      备注: row.note,
+    })),
+  )
+  const mappingSheet = XLSX.utils.json_to_sheet(
+    mappingRows.map((row) => ({
+      平台SKU: row.sku,
+      系统SKU: row.systemSku,
+      运营: row.owner,
+      小组: row.group,
+      店铺别名: row.account,
+    })),
+  )
+  const workbook = XLSX.utils.book_new()
+  XLSX.utils.book_append_sheet(workbook, templateSheet, '监控模板')
+  XLSX.utils.book_append_sheet(workbook, monitorSheet, '全部监控清单')
+  XLSX.utils.book_append_sheet(workbook, mappingSheet, '映射信息')
+  XLSX.writeFile(workbook, 'SKU监控清单模板与映射信息.xlsx')
+}
+
+const exportOnlineImportTemplate = (mappingRows: MappingRow[]) => {
+  const workbook = XLSX.utils.book_new()
+  const templateHeaders = ['平台SKU', 'ASIN分类', 'ASIN', '运营', '组别', '账号', '备注']
+  const templateSheet = XLSX.utils.aoa_to_sheet([
+    templateHeaders,
+    ['KM1B0901-06205-BK', '竞对ASIN', 'B08CF2V57W', '', '', '', '填写平台SKU后自动匹配运营、组别、账号；无映射则显示 NA'],
+    ['', '', '', '', '', '', ''],
+    ['', '', '', '', '', '', ''],
+    ['', '', '', '', '', '', ''],
+  ])
+  templateSheet['!dataValidation'] = [
+    {
+      sqref: 'B2:B2000',
+      type: 'list',
+      allowBlank: 1,
+      formulas: ['"竞对ASIN,KMASIN"'],
+    },
+  ] as unknown as never
+  ;['D2', 'E2', 'F2', 'D3', 'E3', 'F3', 'D4', 'E4', 'F4', 'D5', 'E5', 'F5'].forEach((cell) => {
+    const row = Number(cell.slice(1))
+    const formulaMap: Record<string, string> = {
+      D: `IFERROR(XLOOKUP($A${row},映射信息!$A:$A,映射信息!$C:$C),"NA")`,
+      E: `IFERROR(XLOOKUP($A${row},映射信息!$A:$A,映射信息!$D:$D),"NA")`,
+      F: `IFERROR(XLOOKUP($A${row},映射信息!$A:$A,映射信息!$E:$E),"NA")`,
+    }
+    const column = cell[0]
+    templateSheet[cell] = { t: 'str', f: formulaMap[column] }
+  })
+  templateSheet['!cols'] = [{ wch: 24 }, { wch: 16 }, { wch: 18 }, { wch: 18 }, { wch: 16 }, { wch: 18 }, { wch: 48 }]
+  const mappingSheet = XLSX.utils.json_to_sheet(
+    mappingRows.map((row) => ({
+      平台SKU: row.sku,
+      系统SKU: row.systemSku,
+      运营: row.owner,
+      小组: row.group,
+      店铺别名: row.account,
+    })),
+  )
+  mappingSheet['!cols'] = [{ wch: 24 }, { wch: 22 }, { wch: 18 }, { wch: 16 }, { wch: 18 }]
+  XLSX.utils.book_append_sheet(workbook, templateSheet, '批量导入模板')
+  XLSX.utils.book_append_sheet(workbook, mappingSheet, '映射信息')
+  XLSX.writeFile(workbook, '批量导入平台SKU与监控ASIN模板.xlsx')
+}
+
 const exportRows = (mode: EditMode, rows: MonitorRow[] | MappingRow[], fileName?: string) => {
   const data =
     mode === 'monitor'
@@ -713,18 +823,52 @@ const exportRows = (mode: EditMode, rows: MonitorRow[] | MappingRow[], fileName?
   XLSX.writeFile(workbook, fileName ?? `${mode === 'monitor' ? 'SKU监控清单' : '映射信息'}导出.xlsx`)
 }
 
-const exportAlertItems = (title: string, items: AlertItem[]) => {
+const exportMissingKeepaReport = (items: AlertItem[]) => {
   const data = items.map((item) => ({
-    说明: item.message,
+    缺失类型: item.detail || '未分类',
+    处理建议: item.detail?.includes('未出现在本次上传')
+      ? '检查 Keepa 导出范围是否覆盖该 ASIN，或确认该 ASIN 是否仍需监控'
+      : item.detail?.includes('价格与排名都缺失')
+        ? '优先检查链接是否下架、抑制，或 Keepa 是否抓取异常'
+        : item.detail?.includes('价格缺失')
+          ? '检查 Buy Box / New Current 是否为空'
+          : '检查排名字段是否为空或类目异常',
     运营: item.owner || '',
     SKU: item.sku || '',
+    ASIN分类: item.category || '',
     ASIN: item.asin || '',
-    类型: item.category || '',
+    说明: item.message,
   }))
-  const sheet = XLSX.utils.json_to_sheet(data)
+  const summary = XLSX.utils.json_to_sheet(data)
+  const grouped = data.reduce<Record<string, number>>((acc, row) => {
+    acc[row.缺失类型] = (acc[row.缺失类型] ?? 0) + 1
+    return acc
+  }, {})
+  const summarySheet = XLSX.utils.json_to_sheet(
+    Object.entries(grouped).map(([type, count]) => ({ 缺失类型: type, 数量: count })),
+  )
   const workbook = XLSX.utils.book_new()
-  XLSX.utils.book_append_sheet(workbook, sheet, '预警清单')
-  XLSX.writeFile(workbook, `${title}预警清单.xlsx`)
+  XLSX.utils.book_append_sheet(workbook, summarySheet, '分类汇总')
+  XLSX.utils.book_append_sheet(workbook, summary, '缺失明细')
+  XLSX.writeFile(workbook, '缺少Keepa分类处理表.xlsx')
+}
+
+const exportUnmatchedOnlineRows = (rows: MonitorRow[]) => {
+  const sheet = XLSX.utils.json_to_sheet(
+    rows.map((row) => ({
+      平台SKU: row.sku,
+      ASIN分类: row.asinType,
+      ASIN: row.asin,
+      备注: row.note,
+      当前运营: row.owner,
+      当前组别: row.group,
+      当前账号: row.account,
+      处理建议: '请先补充映射总表，再重新上传映射信息以自动匹配',
+    })),
+  )
+  const workbook = XLSX.utils.book_new()
+  XLSX.utils.book_append_sheet(workbook, sheet, '待补映射平台SKU')
+  XLSX.writeFile(workbook, '在线新增待补映射平台SKU.xlsx')
 }
 
 const exportMonitorWithDuplicateMarks = (rows: MonitorRow[]) => {
@@ -807,19 +951,18 @@ function App() {
   const [ownerQuery, setOwnerQuery] = useState('')
   const [skuQuery, setSkuQuery] = useState('')
   const [asinQuery, setAsinQuery] = useState('')
-  const [keywordQuery, setKeywordQuery] = useState('')
-  const [selectedAsin, setSelectedAsin] = useState(
-    mergeMonitorRows(initialState.monitorRows, initialState.onlineRows)[0]?.asin ?? '',
-  )
-  const [priceAlert, setPriceAlert] = useState(12)
-  const [rankAlert, setRankAlert] = useState(35)
-  const [maintenancePanel, setMaintenancePanel] = useState<MaintenancePanel>(null)
-  const [editingIndex, setEditingIndex] = useState<number | null>(null)
-  const [onlineForm, setOnlineForm] = useState<MonitorRow>(emptyOnlineMonitor)
+  const [groupQuery, setGroupQuery] = useState('')
+  const [accountQuery, setAccountQuery] = useState('')
+  const [brandQuery, setBrandQuery] = useState('')
+  const [selectedAsin, setSelectedAsin] = useState('')
+  const [batchOnlineRows, setBatchOnlineRows] = useState<MonitorRow[]>(Array.from({ length: 5 }, () => ({ ...emptyOnlineMonitor })))
+  const [priceAlert] = useState(12)
+  const [rankAlert] = useState(35)
+  const [openPages, setOpenPages] = useState<WorkspacePage[]>(['dashboard'])
+  const [activePage, setActivePage] = useState<WorkspacePage>('dashboard')
   const [isRefreshingOnline, setIsRefreshingOnline] = useState(false)
   const [uploadSummary, setUploadSummary] = useState<UploadSummary>(emptyUploadSummary)
   const [keepaUploadReports, setKeepaUploadReports] = useState<KeepaUploadReports>(initialState.keepaUploadReports)
-  const [collapsedAlerts, setCollapsedAlerts] = useState<Record<string, boolean>>({})
   const [resultFilters, setResultFilters] = useState<Record<ResultFilterKey, string>>({
     owner: '',
     sku: '',
@@ -831,7 +974,16 @@ function App() {
     yesterdayRank: '',
   })
   const [openResultFilter, setOpenResultFilter] = useState<ResultFilterKey | null>(null)
-  const editorPanelRef = useRef<HTMLElement | null>(null)
+  const [resultColumnWidths, setResultColumnWidths] = useState<Record<ResultColumnKey, number>>({
+    owner: 132,
+    sku: 168,
+    asinType: 104,
+    brand: 148,
+    asin: 150,
+    price: 148,
+    todayRank: 130,
+    yesterdayRank: 130,
+  })
   const [status, setStatus] = useState(
     `已自动载入原 Excel：${initialState.monitorRows.length} 条监控清单、${initialState.mappingRows.length} 条映射、${initialState.keepaRows.length} 条 Keepa。趋势仅保留最近 5 天。`,
   )
@@ -852,7 +1004,7 @@ function App() {
     try {
       localStorage.setItem(storageKey, JSON.stringify(payload))
     } catch {
-      setStatus('数据已在当前页面完成解析，但浏览器存储空间不足，刷新后可能无法保留。请先使用一键清空再重新上传。')
+      setStatus('数据已在当前页面完成解析，但浏览器存储空间不足，刷新后可能无法保留。请清理浏览器缓存或减少数据后重新上传。')
     }
   }, [keepaRows, keepaUploadReports, mappingRows, monitorRows, onlineRows, sourceReports, todayBuyBox, yesterdayBuyBox, yesterdayKeepaRows])
 
@@ -875,8 +1027,7 @@ function App() {
     () => mergeMonitorRows(monitorRows, onlineRows),
     [monitorRows, onlineRows],
   )
-  const onlineFormMapping = mappingBySku.get(normalized(onlineForm.sku))
-  const onlineFormNeedsManualMapping = Boolean(onlineForm.sku && !onlineFormMapping)
+  const resizingColumnRef = useRef<{ key: ResultColumnKey; startX: number; startWidth: number } | null>(null)
 
   useEffect(() => {
     if (yesterdayBuyBox.date && yesterdayKeepaRows.length) {
@@ -926,7 +1077,9 @@ function App() {
     const ownerNeedle = normalized(ownerQuery)
     const skuNeedle = normalized(skuQuery)
     const asinNeedle = normalized(asinQuery)
-    const keywordNeedle = normalized(keywordQuery)
+    const groupNeedle = normalized(groupQuery)
+    const accountNeedle = normalized(accountQuery)
+    const brandNeedle = normalized(brandQuery)
     const columnNeedles = Object.fromEntries(
       Object.entries(resultFilters).map(([key, value]) => [key, normalized(value)]),
     ) as Record<ResultFilterKey, string>
@@ -949,70 +1102,132 @@ function App() {
         (!ownerNeedle || normalized(row.owner).includes(ownerNeedle)) &&
         (!skuNeedle || [row.sku, row.bundleSku].map(normalized).some((value) => value.includes(skuNeedle))) &&
         (!asinNeedle || normalized(row.asin).includes(asinNeedle)) &&
-        (!keywordNeedle ||
-          [row.group, row.account, row.asinType, row.note, row.keepa?.brand, row.keepa?.title]
-            .map(normalized)
-            .some((value) => value.includes(keywordNeedle)))
+        (!groupNeedle || normalized(row.group).includes(groupNeedle)) &&
+        (!accountNeedle || normalized(row.account).includes(accountNeedle)) &&
+        (!brandNeedle || normalized(row.keepa?.brand).includes(brandNeedle))
     })
-  }, [asinQuery, enrichedRows, keywordQuery, ownerQuery, resultFilters, skuQuery])
+  }, [accountQuery, asinQuery, brandQuery, enrichedRows, groupQuery, ownerQuery, resultFilters, skuQuery])
 
   const skuOptions = useMemo(() => {
     const ownerNeedle = normalized(ownerQuery)
     const asinNeedle = normalized(asinQuery)
-    const keywordNeedle = normalized(keywordQuery)
+    const groupNeedle = normalized(groupQuery)
+    const accountNeedle = normalized(accountQuery)
+    const brandNeedle = normalized(brandQuery)
     const options = new Set<string>()
     for (const row of enrichedRows) {
       const matchesContext =
         (!ownerNeedle || normalized(row.owner).includes(ownerNeedle)) &&
         (!asinNeedle || normalized(row.asin).includes(asinNeedle)) &&
-        (!keywordNeedle ||
-          [row.group, row.account, row.asinType, row.note, row.keepa?.brand, row.keepa?.title]
-            .map(normalized)
-            .some((value) => value.includes(keywordNeedle)))
+        (!groupNeedle || normalized(row.group).includes(groupNeedle)) &&
+        (!accountNeedle || normalized(row.account).includes(accountNeedle)) &&
+        (!brandNeedle || normalized(row.keepa?.brand).includes(brandNeedle))
       if (matchesContext && row.sku) options.add(row.sku)
       if (matchesContext && row.bundleSku) options.add(row.bundleSku)
       if (options.size >= 120) break
     }
     return [...options].sort()
-  }, [asinQuery, enrichedRows, keywordQuery, ownerQuery])
+  }, [accountQuery, asinQuery, brandQuery, enrichedRows, groupQuery, ownerQuery])
 
   const ownerOptions = useMemo(() => {
     const skuNeedle = normalized(skuQuery)
     const asinNeedle = normalized(asinQuery)
-    const keywordNeedle = normalized(keywordQuery)
+    const groupNeedle = normalized(groupQuery)
+    const accountNeedle = normalized(accountQuery)
+    const brandNeedle = normalized(brandQuery)
     const options = new Set<string>()
     for (const row of enrichedRows) {
       const matchesContext =
         (!skuNeedle || [row.sku, row.bundleSku].map(normalized).some((value) => value.includes(skuNeedle))) &&
         (!asinNeedle || normalized(row.asin).includes(asinNeedle)) &&
-        (!keywordNeedle ||
-          [row.group, row.account, row.asinType, row.note, row.keepa?.brand, row.keepa?.title]
-            .map(normalized)
-            .some((value) => value.includes(keywordNeedle)))
+        (!groupNeedle || normalized(row.group).includes(groupNeedle)) &&
+        (!accountNeedle || normalized(row.account).includes(accountNeedle)) &&
+        (!brandNeedle || normalized(row.keepa?.brand).includes(brandNeedle))
       if (matchesContext && row.owner) options.add(row.owner)
       if (options.size >= 120) break
     }
     return [...options].sort()
-  }, [asinQuery, enrichedRows, keywordQuery, skuQuery])
+  }, [accountQuery, asinQuery, brandQuery, enrichedRows, groupQuery, skuQuery])
 
   const asinOptions = useMemo(() => {
     const ownerNeedle = normalized(ownerQuery)
     const skuNeedle = normalized(skuQuery)
-    const keywordNeedle = normalized(keywordQuery)
+    const groupNeedle = normalized(groupQuery)
+    const accountNeedle = normalized(accountQuery)
+    const brandNeedle = normalized(brandQuery)
     const options = new Set<string>()
     for (const row of enrichedRows) {
       const matchesContext =
         (!ownerNeedle || normalized(row.owner).includes(ownerNeedle)) &&
         (!skuNeedle || [row.sku, row.bundleSku].map(normalized).some((value) => value.includes(skuNeedle))) &&
-        (!keywordNeedle ||
-          [row.group, row.account, row.asinType, row.note, row.keepa?.brand, row.keepa?.title]
-            .map(normalized)
-            .some((value) => value.includes(keywordNeedle)))
+        (!groupNeedle || normalized(row.group).includes(groupNeedle)) &&
+        (!accountNeedle || normalized(row.account).includes(accountNeedle)) &&
+        (!brandNeedle || normalized(row.keepa?.brand).includes(brandNeedle))
       if (matchesContext && row.asin) options.add(row.asin)
       if (options.size >= 160) break
     }
     return [...options].sort()
-  }, [enrichedRows, keywordQuery, ownerQuery, skuQuery])
+  }, [accountQuery, brandQuery, enrichedRows, groupQuery, ownerQuery, skuQuery])
+
+  const groupOptions = useMemo(() => {
+    const ownerNeedle = normalized(ownerQuery)
+    const skuNeedle = normalized(skuQuery)
+    const asinNeedle = normalized(asinQuery)
+    const accountNeedle = normalized(accountQuery)
+    const brandNeedle = normalized(brandQuery)
+    const options = new Set<string>()
+    for (const row of enrichedRows) {
+      const matchesContext =
+        (!ownerNeedle || normalized(row.owner).includes(ownerNeedle)) &&
+        (!skuNeedle || [row.sku, row.bundleSku].map(normalized).some((value) => value.includes(skuNeedle))) &&
+        (!asinNeedle || normalized(row.asin).includes(asinNeedle)) &&
+        (!accountNeedle || normalized(row.account).includes(accountNeedle)) &&
+        (!brandNeedle || normalized(row.keepa?.brand).includes(brandNeedle))
+      if (matchesContext && row.group) options.add(row.group)
+      if (options.size >= 120) break
+    }
+    return [...options].sort()
+  }, [accountQuery, asinQuery, brandQuery, enrichedRows, ownerQuery, skuQuery])
+
+  const accountOptions = useMemo(() => {
+    const ownerNeedle = normalized(ownerQuery)
+    const skuNeedle = normalized(skuQuery)
+    const asinNeedle = normalized(asinQuery)
+    const groupNeedle = normalized(groupQuery)
+    const brandNeedle = normalized(brandQuery)
+    const options = new Set<string>()
+    for (const row of enrichedRows) {
+      const matchesContext =
+        (!ownerNeedle || normalized(row.owner).includes(ownerNeedle)) &&
+        (!skuNeedle || [row.sku, row.bundleSku].map(normalized).some((value) => value.includes(skuNeedle))) &&
+        (!asinNeedle || normalized(row.asin).includes(asinNeedle)) &&
+        (!groupNeedle || normalized(row.group).includes(groupNeedle)) &&
+        (!brandNeedle || normalized(row.keepa?.brand).includes(brandNeedle))
+      if (matchesContext && row.account) options.add(row.account)
+      if (options.size >= 120) break
+    }
+    return [...options].sort()
+  }, [asinQuery, brandQuery, enrichedRows, groupQuery, ownerQuery, skuQuery])
+
+  const brandOptions = useMemo(() => {
+    const ownerNeedle = normalized(ownerQuery)
+    const skuNeedle = normalized(skuQuery)
+    const asinNeedle = normalized(asinQuery)
+    const groupNeedle = normalized(groupQuery)
+    const accountNeedle = normalized(accountQuery)
+    const options = new Set<string>()
+    for (const row of enrichedRows) {
+      const matchesContext =
+        (!ownerNeedle || normalized(row.owner).includes(ownerNeedle)) &&
+        (!skuNeedle || [row.sku, row.bundleSku].map(normalized).some((value) => value.includes(skuNeedle))) &&
+        (!asinNeedle || normalized(row.asin).includes(asinNeedle)) &&
+        (!groupNeedle || normalized(row.group).includes(groupNeedle)) &&
+        (!accountNeedle || normalized(row.account).includes(accountNeedle))
+      if (matchesContext && row.keepa?.brand) options.add(row.keepa.brand)
+      if (options.size >= 120) break
+    }
+    return [...options].sort()
+  }, [accountQuery, asinQuery, enrichedRows, groupQuery, ownerQuery, skuQuery])
 
   const selectedRows = useMemo(
     () => enrichedRows.filter((row) => normalized(row.asin) === normalized(selectedAsin)),
@@ -1042,6 +1257,27 @@ function App() {
     return grouped
   }, [history])
 
+  useEffect(() => {
+    const handleMouseMove = (event: MouseEvent) => {
+      const resizing = resizingColumnRef.current
+      if (!resizing) return
+      const delta = event.clientX - resizing.startX
+      setResultColumnWidths((current) => ({
+        ...current,
+        [resizing.key]: Math.max(88, resizing.startWidth + delta),
+      }))
+    }
+    const handleMouseUp = () => {
+      resizingColumnRef.current = null
+    }
+    document.addEventListener('mousemove', handleMouseMove)
+    document.addEventListener('mouseup', handleMouseUp)
+    return () => {
+      document.removeEventListener('mousemove', handleMouseMove)
+      document.removeEventListener('mouseup', handleMouseUp)
+    }
+  }, [])
+
   const alertGroups = useMemo(() => {
     const missingMapping: AlertItem[] = []
     const missingKeepa: AlertItem[] = []
@@ -1068,19 +1304,33 @@ function App() {
           asin: row.asin,
           sku: row.sku,
           owner: row.owner,
+          group: row.group,
+          account: row.account,
           category: row.asinType,
           monitorIndexes: [index],
         })
       }
-      if (!row.keepa) {
+      const missingKeepaReason = !row.keepa
+        ? 'Keepa 未出现在本次上传'
+        : row.keepa.price === null && row.keepa.rank === null
+          ? 'Keepa 已读取该 ASIN，但价格与排名都缺失'
+          : row.keepa.price === null
+            ? 'Keepa 已读取该 ASIN，但价格缺失'
+            : row.keepa.rank === null
+              ? 'Keepa 已读取该 ASIN，但排名缺失'
+              : ''
+      if (missingKeepaReason) {
         missingKeepa.push({
           id: `missing-keepa-${index}`,
-          message: `${row.asin} 缺少 Keepa 数据，无法更新价格与排名`,
+          message: `${row.asin} ${missingKeepaReason}`,
           asin: row.asin,
           sku: row.sku,
           owner: row.owner,
+          group: row.group,
+          account: row.account,
           category: row.asinType,
           monitorIndexes: [index],
+          detail: missingKeepaReason,
         })
       }
       if (row.ruleSource === '待补充规则') {
@@ -1090,6 +1340,8 @@ function App() {
           asin: row.asin,
           sku: row.sku,
           owner: row.owner,
+          group: row.group,
+          account: row.account,
           category: row.asinType,
           monitorIndexes: [index],
         })
@@ -1107,6 +1359,8 @@ function App() {
         asin: asin.toUpperCase(),
         sku: sku.toUpperCase(),
         owner: owners,
+        group: rows[0]?.group,
+        account: rows[0]?.account,
         category: asinType,
         monitorIndexes: duplicateIndexes,
       })
@@ -1137,6 +1391,8 @@ function App() {
             kmPrice: kmPriceCurrent ?? kmPricePrevious,
             competitorPrice: current.price,
             owner: row?.owner,
+            group: row?.group,
+            account: row?.account,
             category: row?.asinType,
             previousRank: previous.rank,
             currentRank: current.rank,
