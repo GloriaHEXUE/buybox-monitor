@@ -1409,6 +1409,8 @@ function App() {
             asin,
             sku: row?.sku,
             owner: row?.owner,
+            group: row?.group,
+            account: row?.account,
             category: row?.asinType,
           })
         }
@@ -1424,12 +1426,17 @@ function App() {
     return groups.filter((group) => group.count > 0)
   }, [enrichedRows, history, historyByAsin, kmAsinBySku, priceAlert, rankAlert])
 
-  const alerts = useMemo(
-    () => alertGroups.flatMap((group) => group.items.map((item) => item.message)),
+  const actionAlertGroups = useMemo(
+    () => alertGroups.filter((group) => !['buybox', 'missing-keepa', 'rule-gap', 'duplicate'].includes(group.key)),
     [alertGroups],
   )
 
-  const stats = [
+  const alerts = useMemo(
+    () => actionAlertGroups.flatMap((group) => group.items.map((item) => item.message)),
+    [actionAlertGroups],
+  )
+
+  const updateStats = [
     { label: '监控 ASIN', value: new Set(combinedMonitorRows.map((row) => row.asin)).size },
     { label: '平台 SKU', value: new Set(combinedMonitorRows.map((row) => row.sku)).size },
     { label: '映射 SKU', value: mappingRows.length },
@@ -1447,50 +1454,36 @@ function App() {
     [alertGroups],
   )
 
-  const ruleStats = useMemo(() => {
-    const direct = enrichedRows.filter((row) => row.ruleSource === '监控清单精确值').length
-    const mapped = enrichedRows.filter((row) => row.ruleSource === '平台SKU映射').length
-    const keepaMatched = enrichedRows.filter((row) => row.ruleSource.includes('Keepa标题/品牌识别')).length
-    const unresolved = enrichedRows.filter((row) => row.ruleSource === '待补充规则').length
-    return { direct, mapped, keepaMatched, unresolved }
-  }, [enrichedRows])
+  const unmatchedOnlineRows = useMemo(
+    () => onlineRows.filter((row) => !mappingBySku.has(normalized(row.sku))),
+    [mappingBySku, onlineRows],
+  )
 
-  const rankTrendRows = useMemo(() => {
-    const rows: RankTrendRow[] = []
-    for (const [asin, points] of historyByAsin) {
-      const valid = points.filter((point) => typeof point.rank === 'number')
-      if (valid.length < 3) continue
-      const ranks = valid.map((point) => point.rank as number)
-      let downStreak = 1
-      let upStreak = 1
-      for (let index = 1; index < ranks.length; index += 1) {
-        if (ranks[index] > ranks[index - 1]) downStreak += 1
-        else downStreak = 1
-        if (ranks[index] < ranks[index - 1]) upStreak += 1
-        else upStreak = 1
-      }
-      const isDown = downStreak >= 3
-      const isUp = upStreak >= 3
-      if (!isDown && !isUp) continue
-      const related = enrichedRows.find((row) => normalized(row.asin) === asin)
-      if (!related) continue
-      const startRank = ranks[0]
-      const endRank = ranks[ranks.length - 1]
-      const changePct = startRank !== 0 ? Math.abs((endRank - startRank) / startRank) * 100 : 0
-      rows.push({
-        asin: related.asin,
-        sku: related.sku,
-        owner: related.owner,
-        asinType: related.asinType,
-        direction: isDown ? 'down' : 'up',
-        startRank,
-        endRank,
-        days: valid.length,
-        changePct,
-      })
+  const openPage = (page: WorkspacePage) => {
+    setOpenPages((current) => (current.includes(page) ? current : [...current, page]))
+    setActivePage(page)
+    if (page === 'add-monitor') {
+      setBatchOnlineRows(Array.from({ length: 8 }, () => ({ ...emptyOnlineMonitor })))
+      setStatus('已打开添加监控ASIN，可在线新增或导出模板批量维护。')
+    } else if (page === 'data-update') {
+      setStatus('已打开数据更新页，可上传 Keepa、映射信息和 SKU / ASIN 监控清单。')
+    } else if (page === 'buybox') {
+      setStatus('已打开 Buy Box 丢失/恢复页。')
+    } else {
+      setStatus('已打开运营看板。')
     }
-    return rows.sort((a, b) => b.changePct - a.changePct)
-  }, [enrichedRows, historyByAsin])
+  }
+
+  const closePage = (page: WorkspacePage) => {
+    setOpenPages((current) => {
+      const next = current.filter((item) => item !== page) as WorkspacePage[]
+      const fallback: WorkspacePage[] = next.length ? next : ['dashboard']
+      if (activePage === page) {
+        setActivePage(fallback[fallback.length - 1])
+      }
+      return fallback
+    })
+  }
 
   const visibleRows = filteredRows.slice(0, 180)
 
@@ -1529,7 +1522,7 @@ function App() {
     const active = Boolean(resultFilters[key])
     const open = openResultFilter === key
     return (
-      <th>
+      <th style={{ width: `${resultColumnWidths[key]}px` }}>
         <div className="result-filter-wrap">
           <span>{label}</span>
           <button
@@ -1554,6 +1547,20 @@ function App() {
               {active ? <button onClick={() => setResultFilters((current) => ({ ...current, [key]: '' }))} type="button">清除</button> : null}
             </div>
           ) : null}
+          <button
+            aria-label={`调整${label}列宽`}
+            className="column-resize-handle"
+            onMouseDown={(event) => {
+              event.preventDefault()
+              event.stopPropagation()
+              resizingColumnRef.current = {
+                key,
+                startX: event.clientX,
+                startWidth: resultColumnWidths[key],
+              }
+            }}
+            type="button"
+          />
         </div>
       </th>
     )
@@ -1645,6 +1652,18 @@ function App() {
     }
   }
 
+  const handleSidebarDownload = (kind: UploadKind) => {
+    if (kind === 'keepa') {
+      downloadTemplate('keepa')
+      return
+    }
+    if (kind === 'mapping') {
+      exportRows('mapping', mappingRows, '映射信息完整版.xlsx')
+      return
+    }
+    exportMonitorTemplatePackage(combinedMonitorRows, mappingRows)
+  }
+
   const handleUpload = async (kind: UploadKind, file: File | null) => {
     if (!file) return
     if (kind === 'keepa') {
@@ -1654,7 +1673,7 @@ function App() {
     }
     setStatus(`正在解析 ${file.name} ...`)
     try {
-      const rows = await readWorkbookRows(file)
+      const rows = await readWorkbookRows(file, kind)
       const updatedAt = new Date().toLocaleString('zh-CN', { hour12: false })
       if (kind === 'mapping') {
         const parsed = parseMapping(rows)
@@ -1672,6 +1691,7 @@ function App() {
           notes: [
             `固定映射源已替换为 ${parsed.length} 条记录`,
             '在线添加数据已自动重新匹配运营、组别、账号',
+            '当前按“平台SKU -> 运营 / 小组 / 店铺别名”自动匹配在线新增记录',
           ],
           errors: [],
         })
@@ -1717,131 +1737,157 @@ function App() {
     setStatus('已取消本次 Keepa 上传，当前今日和昨日数据未改变。')
   }
 
-  const clearKeepaData = () => {
-    setKeepaRows([])
-    setYesterdayKeepaRows([])
-    setHistory([])
-    setTodayBuyBox(emptyBuyBoxBoard())
-    setYesterdayBuyBox(emptyBuyBoxBoard())
-    setKeepaUploadReports(emptyKeepaUploadReports())
-    setPendingKeepaUpload(null)
-    setUploadSummary((current) => current.kind === 'keepa' ? emptyUploadSummary : current)
-    setStatus('已清空昨日和今日 Keepa 数据，可重新上传两份数据源。SKU 监控清单和映射信息保持不变。')
-  }
-
   const startOnlineEdit = (index: number) => {
-    setEditingIndex(index)
-    setOnlineForm(onlineRows[index] ?? emptyOnlineMonitor)
+    const target = onlineRows[index] ?? emptyOnlineMonitor
+    setBatchOnlineRows([
+      { ...target },
+      ...Array.from({ length: 7 }, () => ({ ...emptyOnlineMonitor })),
+    ])
   }
 
-  const startOnlineAdd = () => {
-    setEditingIndex(null)
-    setOnlineForm(emptyOnlineMonitor)
+  const startBatchOnlineAdd = () => {
+    setBatchOnlineRows(Array.from({ length: 8 }, () => ({ ...emptyOnlineMonitor })))
+    setStatus('已切换到在线批量添加，可按表格方式录入多条监控。')
   }
 
-  const updateOnlineSku = (sku: string) => {
-    const mapping = mappingBySku.get(normalized(sku))
-    setOnlineForm((current) => ({
-      ...current,
-      sku,
-      owner: mapping?.owner ?? '',
-      group: mapping?.group ?? '',
-      account: mapping?.account ?? '',
+  const updateBatchOnlineCell = (index: number, key: keyof MonitorRow, value: string) => {
+    setBatchOnlineRows((rows) => rows.map((row, rowIndex) => {
+      if (rowIndex !== index) return row
+      if (key === 'sku') {
+        const mapping = mappingBySku.get(normalized(value))
+        return {
+          ...row,
+          sku: value,
+          owner: mapping?.owner ?? row.owner,
+          group: mapping?.group ?? row.group,
+          account: mapping?.account ?? row.account,
+        }
+      }
+      return { ...row, [key]: value }
     }))
   }
 
-  const saveOnlineRow = () => {
-    const mapping = mappingBySku.get(normalized(onlineForm.sku))
-    const nextRow: MonitorRow = {
-      ...onlineForm,
-      sku: onlineForm.sku.trim(),
-      asinType: onlineForm.asinType.trim(),
-      asin: onlineForm.asin.trim(),
-      owner: (mapping?.owner ?? onlineForm.owner).trim(),
-      group: (mapping?.group ?? onlineForm.group).trim(),
-      account: (mapping?.account ?? onlineForm.account).trim(),
-      note: onlineForm.note || '在线添加',
-    }
-    if (!nextRow.sku || !nextRow.asinType || !nextRow.asin) {
-      setStatus('在线添加必须填写平台 SKU、ASIN 分类和 ASIN。')
+  const addBatchOnlineLine = () => {
+    setBatchOnlineRows((rows) => [...rows, { ...emptyOnlineMonitor }])
+  }
+
+  const removeBatchOnlineLine = (index: number) => {
+    setBatchOnlineRows((rows) => rows.length > 1 ? rows.filter((_, rowIndex) => rowIndex !== index) : [{ ...emptyOnlineMonitor }])
+  }
+
+  const batchColumnKeys: Array<keyof MonitorRow> = ['sku', 'asinType', 'asin', 'owner', 'group', 'account']
+
+  const applyBatchValue = (rows: MonitorRow[], rowIndex: number, key: keyof MonitorRow, value: string) => {
+    while (rows.length <= rowIndex) rows.push({ ...emptyOnlineMonitor })
+    const next = rows[rowIndex]
+    if (key === 'sku') {
+      const mapping = mappingBySku.get(normalized(value))
+      rows[rowIndex] = {
+        ...next,
+        sku: value,
+        owner: mapping?.owner ?? next.owner,
+        group: mapping?.group ?? next.group,
+        account: mapping?.account ?? next.account,
+      }
       return
     }
-    if (!mapping && (!nextRow.owner || !nextRow.group || !nextRow.account)) {
-      setStatus('该平台 SKU 未匹配映射表，请手动填写账号、组别和运营。')
+    rows[rowIndex] = { ...next, [key]: value }
+  }
+
+  const handleBatchPaste = (rowIndex: number, columnKey: keyof MonitorRow, text: string) => {
+    if (!/[\n\t]/.test(text)) return false
+    const startColumn = batchColumnKeys.indexOf(columnKey)
+    if (startColumn < 0) return false
+    const lines = text.replace(/\r/g, '').split('\n').filter((line) => line.length > 0)
+    if (!lines.length) return false
+    setBatchOnlineRows((current) => {
+      const next = current.map((row) => ({ ...row }))
+      lines.forEach((line, lineIndex) => {
+        const cells = line.split('\t')
+        cells.forEach((cell, cellIndex) => {
+          const key = batchColumnKeys[startColumn + cellIndex]
+          if (!key) return
+          applyBatchValue(next, rowIndex + lineIndex, key, cell.trim())
+        })
+      })
+      return next
+    })
+    return true
+  }
+
+  const saveBatchOnlineRows = () => {
+    const prepared = batchOnlineRows
+      .map((row) => {
+        const mapping = mappingBySku.get(normalized(row.sku))
+        return {
+          ...row,
+          sku: row.sku.trim(),
+          asinType: row.asinType.trim(),
+          asin: row.asin.trim(),
+          owner: (mapping?.owner ?? row.owner).trim(),
+          group: (mapping?.group ?? row.group).trim(),
+          account: (mapping?.account ?? row.account).trim(),
+          note: row.note || '在线批量添加',
+        }
+      })
+      .filter((row) => row.sku || row.asin || row.asinType)
+
+    if (!prepared.length) {
+      setStatus('请先填写至少一条批量在线记录。')
       return
     }
-    if (editingIndex === null && monitorRows.some((row) => monitorRowKey(row) === monitorRowKey(nextRow))) {
-      setStatus('固定监控源中已存在相同的平台 SKU、ASIN 分类和 ASIN，无需重复添加。')
+
+    const invalid = prepared.find((row) => !row.sku || !row.asinType || !row.asin || !row.owner || !row.group || !row.account)
+    if (invalid) {
+      setStatus('批量在线添加中存在未补齐的记录，请检查平台 SKU、ASIN 分类、ASIN 及映射信息。')
       return
     }
-    const duplicateIndex = onlineRows.findIndex((row) => monitorRowKey(row) === monitorRowKey(nextRow))
-    const targetIndex = editingIndex ?? duplicateIndex
-    setOnlineRows((rows) => targetIndex >= 0
-      ? rows.map((row, index) => (index === targetIndex ? nextRow : row))
-      : [nextRow, ...rows])
-    setSelectedAsin(nextRow.asin)
-    setEditingIndex(null)
-    setOnlineForm(emptyOnlineMonitor)
-    setStatus(targetIndex >= 0 ? '在线记录已更新，并同步到监控汇总。' : '在线记录已添加，并同步到监控汇总。')
+
+    const seen = new Set<string>()
+    for (const row of prepared) {
+      const key = monitorRowKey(row)
+      if (seen.has(key)) {
+        setStatus('批量在线添加中存在重复的平台 SKU + ASIN 分类 + ASIN，请先处理后再保存。')
+        return
+      }
+      seen.add(key)
+    }
+
+    setOnlineRows((rows) => {
+      let next = [...rows]
+      for (const row of prepared) {
+        const duplicateIndex = next.findIndex((item) => monitorRowKey(item) === monitorRowKey(row))
+        if (duplicateIndex >= 0) next[duplicateIndex] = row
+        else next = [row, ...next]
+      }
+      return next
+    })
+    setSelectedAsin(prepared[0]?.asin ?? '')
+    setBatchOnlineRows(Array.from({ length: 8 }, () => ({ ...emptyOnlineMonitor })))
+    setStatus(`已批量写入 ${prepared.length} 条在线监控，并同步到监控汇总。`)
   }
 
   const deleteOnlineRow = (index: number) => {
     setOnlineRows((rows) => rows.filter((_, rowIndex) => rowIndex !== index))
-    setEditingIndex(null)
-    setOnlineForm(emptyOnlineMonitor)
     setStatus('已删除在线记录，固定监控源未改变。')
-  }
-
-  const clearOnlineRows = () => {
-    setOnlineRows([])
-    startOnlineAdd()
-    setStatus('已一键清空在线添加数据，固定监控源和映射信息未改变。')
   }
 
   const refreshOnlineMappings = () => {
     setIsRefreshingOnline(true)
     window.setTimeout(() => {
       setOnlineRows((rows) => applyMappingsToOnlineRows(rows, mappingRows))
-      setOnlineForm((current) => {
-        const mapping = mappingBySku.get(normalized(current.sku))
-        return mapping ? { ...current, owner: mapping.owner, group: mapping.group, account: mapping.account } : current
-      })
+      setBatchOnlineRows((rows) => rows.map((row) => {
+        const mapping = mappingBySku.get(normalized(row.sku))
+        return mapping ? { ...row, owner: mapping.owner, group: mapping.group, account: mapping.account } : row
+      }))
       setIsRefreshingOnline(false)
       setStatus(`已重新匹配 ${onlineRows.length} 条在线记录。`)
     }, 450)
   }
 
-  const toggleAlertGroup = (key: string) => {
-    setCollapsedAlerts((current) => ({ ...current, [key]: !current[key] }))
-  }
-
-  const scrollToEditorPanel = () => {
-    window.setTimeout(() => editorPanelRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' }), 80)
-  }
-
-  const openMaintenancePanel = (panel: MaintenancePanel) => {
-    if (!panel) return
-    setMaintenancePanel(panel)
-    if (panel === 'online') {
-      startOnlineAdd()
-      setStatus('已打开在线添加，可直接录入新的 SKU / ASIN 监控关系。')
-    } else if (panel === 'monitor') {
-      setEditingIndex(null)
-      setStatus('已打开 SKU / ASIN 监控清单预览，可查看或导出最新汇总。')
-    } else {
-      setEditingIndex(null)
-      setStatus('已打开固定映射数据预览；需更新时请重新上传映射信息文件。')
-    }
-    scrollToEditorPanel()
-  }
-
-  const jumpToMapping = () => {
-    openMaintenancePanel('mapping')
-  }
-
   return (
     <main className="app-shell">
-      <aside className="sidebar">
+      <aside className="sidebar erp-sidebar">
         <div className="brand">
           <BarChart3 size={24} />
           <div>
