@@ -1896,214 +1896,254 @@ function App() {
           </div>
         </div>
 
-        <div className="upload-stack">
-          {(Object.keys(uploadLabels) as UploadKind[]).map((kind) => (
-            <div className="upload-row" key={kind}>
-              <label className="upload-button">
-                <Upload size={16} />
-                <span>{uploadLabels[kind]}</span>
-                <input accept=".xlsx,.xls,.csv" type="file" onChange={(event) => { const file = event.currentTarget.files?.[0] ?? null; event.currentTarget.value = ''; void handleUpload(kind, file) }} />
-              </label>
-              <button className="icon-button" title="下载模板" type="button" onClick={() => downloadTemplate(kind)}>
-                <Download size={16} />
-              </button>
-            </div>
+        <section className="erp-nav-section">
+          <div className="panel-title"><Upload size={16} />数据更新</div>
+          <div className="erp-nav-list">
+            <button className={activePage === 'data-update' ? 'active-nav' : ''} type="button" onClick={() => openPage('data-update')}>
+              <FileSpreadsheet size={15} />数据更新
+              <span>{keepaRows.length}</span>
+            </button>
+          </div>
+        </section>
+
+        <section className="erp-nav-section">
+          <div className="panel-title"><Bell size={16} />运营看板</div>
+          <div className="erp-nav-list">
+            <button className={activePage === 'dashboard' ? 'active-nav' : ''} type="button" onClick={() => openPage('dashboard')}>
+              <BarChart3 size={15} />运营看板
+            </button>
+            <button className={activePage === 'buybox' ? 'active-nav' : ''} type="button" onClick={() => openPage('buybox')}>
+              <Database size={15} />BuyBox丢失|恢复
+              <span>{todayBuyBox.lost.length + todayBuyBox.recovered.length}</span>
+            </button>
+          </div>
+        </section>
+
+        <p className="status-text">{status}</p>
+      </aside>
+
+      <section className="workspace erp-workspace">
+        <div className="erp-tabbar">
+          {openPages.map((page) => (
+            <button className={activePage === page ? 'erp-tab active' : 'erp-tab'} key={page} type="button" onClick={() => setActivePage(page)}>
+              <span>{workspacePageLabels[page]}</span>
+              {openPages.length > 1 || page !== 'dashboard' ? (
+                <CircleX
+                  size={14}
+                  onClick={(event) => {
+                    event.stopPropagation()
+                    closePage(page)
+                  }}
+                />
+              ) : null}
+            </button>
           ))}
         </div>
 
-        <section className="settings-panel">
-          <div className="panel-title"><Bell size={17} />预警阈值</div>
-          <label>价格变动 ≥ {priceAlert}%<input max="50" min="1" type="range" value={priceAlert} onChange={(event) => setPriceAlert(Number(event.target.value))} /></label>
-          <label>排名下滑 ≥ {rankAlert}%<input max="200" min="5" step="5" type="range" value={rankAlert} onChange={(event) => setRankAlert(Number(event.target.value))} /></label>
-        </section>
-
-        <button className="reset-button" title="清空昨日和今日 Keepa 数据" type="button" onClick={clearKeepaData}><Trash2 size={16} />一键清空</button>
-        <section className="nav-panel">
-          <button className={maintenancePanel === 'online' ? 'active-nav' : ''} type="button" onClick={() => openMaintenancePanel('online')}><Plus size={15} />在线添加 <span>{onlineRows.length}</span></button>
-          <button className={maintenancePanel === 'monitor' ? 'active-nav' : ''} type="button" onClick={() => openMaintenancePanel('monitor')}><Eye size={15} />SKU / ASIN 监控清单</button>
-          <button className={maintenancePanel === 'mapping' ? 'active-nav' : ''} type="button" onClick={() => openMaintenancePanel('mapping')}><Eye size={15} />映射信息</button>
-        </section>
-        <p className="status-text">{status}</p>
-        <section className="sidebar-note-panel">
-          <div className="panel-title"><AlertTriangle size={16} />缺少 Keepa</div>
-          <strong>{missingKeepaItems.length}</strong>
-          <button className="reset-button" type="button" onClick={() => exportAlertItems('缺少Keepa', missingKeepaItems)}>下载缺失清单</button>
-        </section>
-        <section className="sidebar-info-panel">
-          <div className="panel-title"><FileSpreadsheet size={16} />规则归类</div>
-          <div className="sidebar-metric-list">
-            <div className="sidebar-metric-item"><span>监控清单直连</span><strong>{ruleStats.direct}</strong></div>
-            <div className="sidebar-metric-item"><span>映射补全</span><strong>{ruleStats.mapped}</strong></div>
-            <div className="sidebar-metric-item"><span>标题/品牌识别</span><strong>{ruleStats.keepaMatched}</strong></div>
-            <div className="sidebar-metric-item"><span>待补规则</span><strong>{ruleStats.unresolved}</strong></div>
-          </div>
-        </section>
-        <section className="sidebar-info-panel">
-          <div className="panel-title"><Upload size={16} />上传后说明</div>
-          <div className="sidebar-upload-summary">
-            {([
-              ['yesterday', '昨日数据源'],
-              ['today', '今日数据源'],
-            ] as const).map(([key, label]) => {
-              const report = keepaUploadReports[key]
-              const statusLabel = report.status === 'success' ? '上传成功' : report.status === 'error' ? '上传失败' : report.status === 'processing' ? '解析中' : '等待上传'
-              return (
-                <section className={`sidebar-upload-role upload-role-${report.status}`} key={key}>
-                  <div className="sidebar-upload-role-heading"><strong>{label}</strong><span>{statusLabel}</span></div>
-                  <p>{report.fileName || '尚未选择文件'}</p>
-                  {report.status === 'success' ? <p>{report.date} · 已解析 {report.imported.toLocaleString()} 条</p> : null}
-                  {report.notes.length ? <ul className="report-list compact-report-list">{report.notes.map((note) => <li key={note}>{note}</li>)}</ul> : null}
-                  {report.errors.length ? <ul className="report-list report-error compact-report-list">{report.errors.map((error) => <li key={error}>{error}</li>)}</ul> : null}
-                </section>
-              )
-            })}
-            {uploadSummary.fileName && uploadSummary.kind !== 'keepa' ? (
-              <div className="sidebar-upload-block">
-                <span>其他文件</span>
-                <p>{uploadLabels[uploadSummary.kind]} · {uploadSummary.fileName} · {uploadSummary.imported.toLocaleString()} 条</p>
-                {uploadSummary.errors.length ? <ul className="report-list report-error compact-report-list">{uploadSummary.errors.map((error) => <li key={error}>{error}</li>)}</ul> : null}
-              </div>
-            ) : null}
-          </div>
-        </section>
-      </aside>
-
-        <section className="workspace">
-        <header className="topbar">
-          <div className="topbar-intro">
-            <span className="eyebrow">运营检索台</span>
-            <h2>按运营、SKU、ASIN 快速定位监控关系</h2>
-          </div>
-          <div className="filter-grid">
-            <div className="search-box"><Search size={18} /><input list="owner-options" placeholder="检索运营/人名" value={ownerQuery} onChange={(event) => setOwnerQuery(event.target.value)} /><datalist id="owner-options">{ownerOptions.map((owner) => <option key={owner} value={owner} />)}</datalist></div>
-            <div className="search-box"><input list="sku-options" placeholder="检索 SKU" value={skuQuery} onChange={(event) => setSkuQuery(event.target.value)} /><datalist id="sku-options">{skuOptions.map((sku) => <option key={sku} value={sku} />)}</datalist></div>
-            <div className="search-box"><input list="asin-options" placeholder="检索 ASIN" value={asinQuery} onChange={(event) => setAsinQuery(event.target.value)} /><datalist id="asin-options">{asinOptions.map((asin) => <option key={asin} value={asin} />)}</datalist></div>
-            <div className="search-box"><input placeholder="品牌/标题/组别/账号" value={keywordQuery} onChange={(event) => setKeywordQuery(event.target.value)} /></div>
-          </div>
-          <div className="file-note"><FileSpreadsheet size={17} />纯规则检索，本地解析，不调用 token</div>
-        </header>
-
-        <section className="stat-grid">{stats.map((stat) => <div className="stat-card" key={stat.label}><span>{stat.label}</span><strong>{stat.value.toLocaleString()}</strong></div>)}</section>
-
-        <section className="results-stack">
-          <div className="table-panel">
-            <div className="section-heading"><h2>检索结果</h2><span>{filteredRows.length} 条</span></div>
-            <div className="data-table-wrap">
-              <table className="data-table">
-                <thead><tr>{renderResultHeader('owner', '运营')}{renderResultHeader('sku', 'SKU')}{renderResultHeader('asinType', '类型')}{renderResultHeader('brand', '品牌')}{renderResultHeader('asin', 'ASIN')}{renderResultHeader('price', '价格')}{renderResultHeader('todayRank', '今日排名')}{renderResultHeader('yesterdayRank', '昨日排名')}</tr></thead>
-                <tbody>{visibleRows.map((row, index) => {
-                  const previous = visibleRows[index - 1]
-                  const next = visibleRows[index + 1]
-                  const isGroupStart = !previous || previous.sku !== row.sku
-                  const isGroupEnd = !next || next.sku !== row.sku
-                  const typeClass = normalized(row.asinType).includes('kmasin') ? 'type-km' : normalized(row.asinType).includes('竞对') ? 'type-competitor' : 'type-neutral'
-                  const asinHistory = historyByAsin.get(normalized(row.asin))
-                  const priceChange = getMetricChange(asinHistory, 'price')
-                  return <tr className={`${row.asin === selectedAsin ? 'selected-row' : ''} ${isGroupStart ? 'sku-group-start' : ''} ${isGroupEnd ? 'sku-group-end' : ''}`} key={`${row.sku}-${row.asin}-${index}`} onClick={() => setSelectedAsin(row.asin)}><td>{row.owner || '-'}</td><td className="sku-cell">{row.sku}</td><td><span className={`type-tag ${typeClass}`}>{row.asinType || '-'}</span></td><td>{row.keepa?.brand || '-'}</td><td className="asin-cell">{row.asin}</td><td>{renderMetric(row.keepa?.price, priceChange, 'price')}</td><td>{renderRankComparison(row.keepa?.rank, row.yesterdayKeepa?.rank)}</td><td>{typeof row.yesterdayKeepa?.rank === 'number' ? row.yesterdayKeepa.rank.toLocaleString() : '-'}</td></tr>
-                })}</tbody>
-              </table>
-            </div>
-          </div>
-
-          <div className="detail-panel">
-            <div className="section-heading"><h2>ASIN 详情</h2><span>{selectedAsin || '未选择'}</span></div>
-            {selectedRows[0] ? <div className="detail-stack"><div><span className="eyebrow">商品</span><h3>{selectedRows[0].keepa?.title || selectedRows[0].asin}</h3></div>{getPrimaryImageUrl(selectedRows[0].keepa?.image) ? <div className="detail-image-wrap"><img alt={selectedRows[0].asin} className="detail-image" src={getPrimaryImageUrl(selectedRows[0].keepa?.image)} /></div> : null}<dl className="detail-list"><div><dt>运营</dt><dd>{selectedRows[0].owner || '-'}</dd></div><div><dt>SKU</dt><dd>{selectedRows[0].sku}</dd></div><div><dt>品牌</dt><dd>{selectedRows[0].keepa?.brand || '-'}</dd></div><div><dt>归类规则</dt><dd>{selectedRows[0].ruleSource}</dd></div><div><dt>New: Current</dt><dd>{typeof selectedRows[0].keepa?.newCurrent === 'number' ? selectedRows[0].keepa.newCurrent.toFixed(2) : '-'}</dd></div><div><dt>Coupon</dt><dd>{selectedRows[0].keepa?.coupon || '-'}</dd></div></dl></div> : <p className="empty-state">点击左侧结果查看 ASIN。</p>}
-          </div>
-        </section>
-
-        {maintenancePanel === 'online' ? <section className="editor-panel" ref={editorPanelRef}>
-          <div className="section-heading editor-heading">
-            <div><span className="eyebrow">实时同步到监控汇总</span><h2>在线添加</h2></div>
-            <div className="editor-actions">
-              <button className="icon-command" title="重新匹配映射信息" type="button" onClick={refreshOnlineMappings}><RefreshCw className={isRefreshingOnline ? 'spin-icon' : ''} size={16} /></button>
-              <button type="button" onClick={startOnlineAdd}><Plus size={16} />新增</button>
-              <button type="button" onClick={saveOnlineRow}><Save size={16} />{editingIndex === null ? '添加' : '更新'}</button>
-              <button type="button" onClick={() => exportRows('monitor', onlineRows, '在线添加SKU-ASIN.xlsx')}><Download size={16} />导出在线数据</button>
-              <button className="danger-command" disabled={!onlineRows.length} type="button" onClick={clearOnlineRows}><Trash2 size={16} />一键清除</button>
-            </div>
-          </div>
-          <div className="online-form">
-            <label><span>平台 SKU</span><input placeholder="手动填写" value={onlineForm.sku} onChange={(event) => updateOnlineSku(event.target.value)} /></label>
-            <label><span>ASIN 分类</span><input placeholder="例如 KMASIN" value={onlineForm.asinType} onChange={(event) => setOnlineForm({ ...onlineForm, asinType: event.target.value })} /></label>
-            <label><span>ASIN</span><input placeholder="手动填写" value={onlineForm.asin} onChange={(event) => setOnlineForm({ ...onlineForm, asin: event.target.value })} /></label>
-            <label><span>账号</span><input className={onlineFormMapping ? 'mapped-field' : ''} placeholder={onlineFormNeedsManualMapping ? '未匹配，请手动填写' : '映射表自动匹配'} readOnly={Boolean(onlineFormMapping)} value={onlineForm.account} onChange={(event) => setOnlineForm({ ...onlineForm, account: event.target.value })} /></label>
-            <label><span>组别</span><input className={onlineFormMapping ? 'mapped-field' : ''} placeholder={onlineFormNeedsManualMapping ? '未匹配，请手动填写' : '映射表自动匹配'} readOnly={Boolean(onlineFormMapping)} value={onlineForm.group} onChange={(event) => setOnlineForm({ ...onlineForm, group: event.target.value })} /></label>
-            <label><span>运营</span><input className={onlineFormMapping ? 'mapped-field' : ''} placeholder={onlineFormNeedsManualMapping ? '未匹配，请手动填写' : '映射表自动匹配'} readOnly={Boolean(onlineFormMapping)} value={onlineForm.owner} onChange={(event) => setOnlineForm({ ...onlineForm, owner: event.target.value })} /></label>
-          </div>
-          {onlineFormNeedsManualMapping ? <div className="mapping-status mapping-status-warning"><AlertTriangle size={17} /><span>未在映射表找到该平台 SKU，请手动填写账号、组别和运营。</span></div> : onlineFormMapping ? <div className="mapping-status mapping-status-success"><Database size={17} /><span>已匹配映射表：{onlineFormMapping.systemSku || onlineFormMapping.sku}</span></div> : null}
-          <div className="mini-table-wrap online-table-wrap"><table className="data-table mini-table"><thead><tr><th>平台 SKU</th><th>ASIN 分类</th><th>ASIN</th><th>账号</th><th>组别</th><th>运营</th><th>匹配状态</th><th>操作</th></tr></thead><tbody>{onlineRows.length ? onlineRows.map((row, index) => {
-            const matched = mappingBySku.has(normalized(row.sku))
-            return <tr key={`${monitorRowKey(row)}-${index}`}><td className="sku-cell">{row.sku}</td><td>{row.asinType}</td><td className="asin-cell">{row.asin}</td><td>{row.account || '-'}</td><td>{row.group || '-'}</td><td>{row.owner || '-'}</td><td>{matched ? <span className="source-tag source-tag-mapped">已映射</span> : <span className="source-tag source-tag-manual"><AlertTriangle size={13} />手动填写</span>}</td><td><button className="row-icon" title="编辑" type="button" onClick={() => startOnlineEdit(index)}><Edit3 size={14} /></button><button className="row-icon danger" title="删除" type="button" onClick={() => deleteOnlineRow(index)}><Trash2 size={14} /></button></td></tr>
-          }) : <tr><td className="empty-cell" colSpan={8}>暂无在线添加数据</td></tr>}</tbody></table></div>
-        </section> : null}
-
-        {maintenancePanel === 'monitor' || maintenancePanel === 'mapping' ? <section className="editor-panel source-preview-panel" ref={editorPanelRef}>
-          <div className="section-heading editor-heading">
-            <div><span className="eyebrow">固定数据源 · 仅重新上传时更新</span><h2>{maintenancePanel === 'monitor' ? 'SKU / ASIN 监控清单' : '映射信息'}</h2></div>
-            <div className="editor-actions">
-              <button type="button" onClick={() => maintenancePanel === 'monitor' ? exportRows('monitor', combinedMonitorRows, 'SKU-ASIN监控清单汇总.xlsx') : exportRows('mapping', mappingRows)}><Download size={16} />{maintenancePanel === 'monitor' ? '导出最新汇总' : '导出映射信息'}</button>
-            </div>
-          </div>
-          <div className="source-meta"><FileSpreadsheet size={17} /><span>{sourceReports[maintenancePanel].fileName}</span><span>{sourceReports[maintenancePanel].updatedAt}</span><strong>{sourceReports[maintenancePanel].imported.toLocaleString()} 条</strong></div>
-          {maintenancePanel === 'monitor' ? <>
-            <div className="source-summary-grid"><div><span>固定源</span><strong>{monitorRows.length.toLocaleString()}</strong></div><div><span>在线添加</span><strong>{onlineRows.length.toLocaleString()}</strong></div><div><span>最新汇总</span><strong>{combinedMonitorRows.length.toLocaleString()}</strong></div><div><span>监控 ASIN</span><strong>{new Set(combinedMonitorRows.map((row) => normalized(row.asin))).size.toLocaleString()}</strong></div></div>
-            <div className="mini-table-wrap source-table-wrap"><table className="data-table mini-table"><thead><tr><th>运营</th><th>组别</th><th>账号</th><th>平台 SKU</th><th>ASIN 分类</th><th>ASIN</th><th>数据层</th></tr></thead><tbody>{monitorRows.slice(0, 300).map((row, index) => <tr key={`${monitorRowKey(row)}-${index}`}><td>{row.owner || '-'}</td><td>{row.group || '-'}</td><td>{row.account || '-'}</td><td className="sku-cell">{row.sku}</td><td>{row.asinType || '-'}</td><td className="asin-cell">{row.asin}</td><td><span className="source-tag">固定源</span></td></tr>)}</tbody></table></div>
-            {monitorRows.length > 300 ? <p className="preview-note">页面展示前 300 条，导出包含全部 {combinedMonitorRows.length.toLocaleString()} 条最新汇总数据。</p> : null}
-          </> : <>
-            <div className="source-summary-grid"><div><span>映射记录</span><strong>{mappingRows.length.toLocaleString()}</strong></div><div><span>平台 SKU</span><strong>{new Set(mappingRows.map((row) => normalized(row.sku))).size.toLocaleString()}</strong></div><div><span>在线已匹配</span><strong>{onlineRows.filter((row) => mappingBySku.has(normalized(row.sku))).length.toLocaleString()}</strong></div><div><span>在线待补映射</span><strong>{onlineRows.filter((row) => !mappingBySku.has(normalized(row.sku))).length.toLocaleString()}</strong></div></div>
-            <div className="mini-table-wrap source-table-wrap"><table className="data-table mini-table"><thead><tr><th>平台 SKU</th><th>系统 SKU</th><th>运营</th><th>小组</th><th>店铺别名</th></tr></thead><tbody>{mappingRows.slice(0, 300).map((row, index) => <tr key={`${normalized(row.sku)}-${index}`}><td className="sku-cell">{row.sku}</td><td>{row.systemSku || '-'}</td><td>{row.owner || '-'}</td><td>{row.group || '-'}</td><td>{row.account || '-'}</td></tr>)}</tbody></table></div>
-            {mappingRows.length > 300 ? <p className="preview-note">页面展示前 300 条，导出包含全部 {mappingRows.length.toLocaleString()} 条映射数据。</p> : null}
-          </>}
-        </section> : null}
-
-        <section className="chart-grid">
-          <div className="chart-panel"><div className="section-heading"><h2>价格趋势</h2><span>Price</span></div><ResponsiveContainer height={230} width="100%"><LineChart data={selectedHistory}><CartesianGrid stroke="#e6ebf2" vertical={false} /><XAxis dataKey="date" tickLine={false} /><YAxis tickLine={false} width={54} /><Tooltip /><Line dataKey="price" stroke="#1f7a6d" strokeWidth={2.5} type="monotone" /></LineChart></ResponsiveContainer></div>
-          <div className="chart-panel"><div className="section-heading"><h2>排名趋势</h2><span>Rank</span></div><ResponsiveContainer height={230} width="100%"><AreaChart data={selectedHistory}><CartesianGrid stroke="#e6ebf2" vertical={false} /><XAxis dataKey="date" tickLine={false} /><YAxis tickLine={false} width={66} /><Tooltip /><Area dataKey="rank" fill="#dfeeea" stroke="#5067a3" strokeWidth={2.5} type="monotone" /></AreaChart></ResponsiveContainer></div>
-        </section>
-
-        <section className="alerts-panel">
-          <div className="section-heading"><h2>预警中心</h2><span>{alerts.length} 条</span></div>
-          <div className="alert-groups">
-            {alertGroups.filter((group) => !['missing-keepa', 'buybox', 'duplicate'].includes(group.key)).length ? alertGroups.filter((group) => !['missing-keepa', 'buybox', 'duplicate'].includes(group.key)).map((group) => <div className="alert-group" key={group.key}><div className="alert-group-head"><h3>{group.title}</h3><span>{group.count} 条</span><div className="alert-group-actions"><button className="action-pill" type="button" onClick={() => toggleAlertGroup(group.key)}>{collapsedAlerts[group.key] ? '展开明细' : '收起明细'}</button><button className="action-pill icon-pill" title="导出清单" type="button" onClick={() => exportAlertItems(group.title, group.items)}><Download size={14} /></button>{group.key === 'missing-mapping' ? <button className="action-pill" type="button" onClick={jumpToMapping}>去补映射</button> : null}</div></div>{collapsedAlerts[group.key] ? null : <div className="alert-list">{group.items.map((item) => <div className="alert-item" key={item.id}><AlertTriangle size={18} /><div className="alert-content"><span>{item.message}</span></div></div>)}</div>}</div>) : <p className="empty-state">当前没有超过阈值的变化，也没有数据缺口。</p>}
-            <div className="alert-group">
-              <div className="alert-group-head">
-                <h3>重复监控</h3>
-                <span>{duplicateItems.length} 条</span>
-                <div className="alert-group-actions">
-                  <button className="action-pill" type="button" onClick={() => exportMonitorWithDuplicateMarks(combinedMonitorRows)}>下载删减后重传表</button>
+        <div className="erp-page">
+          {activePage === 'dashboard' ? (
+            <>
+              <header className="topbar">
+                <div className="topbar-intro">
+                  <span className="eyebrow">运营检索台</span>
+                  <h2>按运营、SKU、ASIN 快速定位监控关系</h2>
                 </div>
-              </div>
-            </div>
-            <div className="alert-group">
-              <div className="alert-group-head">
-                <h3>近5天排名趋势预警</h3>
-                <span>{rankTrendRows.length} 条</span>
-              </div>
-              <div className="mini-table-wrap">
-                <table className="data-table mini-table">
-                  <thead><tr><th>运营</th><th>SKU</th><th>ASIN</th><th>类型</th><th>趋势</th><th>起始排名</th><th>当前排名</th><th>排名</th><th>连续天数</th></tr></thead>
-                  <tbody>{rankTrendRows.map((row) => {
-                    const improved = row.endRank < row.startRank
-                    return <tr key={`${row.sku}-${row.asin}-${row.direction}`}><td>{row.owner || '-'}</td><td>{row.sku}</td><td>{row.asin}</td><td>{row.asinType}</td><td><span className={row.direction === 'down' ? 'delta-good' : 'delta-bad'}>{row.direction === 'down' ? '持续下滑' : '持续上升'}</span></td><td>{row.startRank.toLocaleString()}</td><td>{row.endRank.toLocaleString()}</td><td><span className={improved ? 'delta-bad plain-delta' : 'delta-good plain-delta'}>{improved ? <ArrowUp size={13} /> : <ArrowDown size={13} />}{`${Math.abs(row.endRank - row.startRank).toLocaleString()} (${row.changePct.toFixed(1)}%)`}</span></td><td>{row.days}</td></tr>
-                  })}</tbody>
-                </table>
-              </div>
-            </div>
-          </div>
-        </section>
+                <div className="filter-grid dashboard-filter-grid">
+                  <div className="search-box"><Search size={18} /><input list="owner-options" placeholder="检索运营/人名" value={ownerQuery} onChange={(event) => setOwnerQuery(event.target.value)} /><datalist id="owner-options">{ownerOptions.map((owner) => <option key={owner} value={owner} />)}</datalist></div>
+                  <div className="search-box"><input list="sku-options" placeholder="检索 SKU" value={skuQuery} onChange={(event) => setSkuQuery(event.target.value)} /><datalist id="sku-options">{skuOptions.map((sku) => <option key={sku} value={sku} />)}</datalist></div>
+                  <div className="search-box"><input list="asin-options" placeholder="检索 ASIN" value={asinQuery} onChange={(event) => setAsinQuery(event.target.value)} /><datalist id="asin-options">{asinOptions.map((asin) => <option key={asin} value={asin} />)}</datalist></div>
+                  <div className="search-box"><input list="group-options" placeholder="检索组别" value={groupQuery} onChange={(event) => setGroupQuery(event.target.value)} /><datalist id="group-options">{groupOptions.map((group) => <option key={group} value={group} />)}</datalist></div>
+                  <div className="search-box"><input list="account-options" placeholder="检索账号" value={accountQuery} onChange={(event) => setAccountQuery(event.target.value)} /><datalist id="account-options">{accountOptions.map((account) => <option key={account} value={account} />)}</datalist></div>
+                  <div className="search-box"><input list="brand-options" placeholder="检索品牌" value={brandQuery} onChange={(event) => setBrandQuery(event.target.value)} /><datalist id="brand-options">{brandOptions.map((brand) => <option key={brand} value={brand} />)}</datalist></div>
+                </div>
+              </header>
 
-        <section className="buybox-day-grid" aria-label="每日 Buy Box 监测">
-          <section className="buybox-day-panel buybox-today-panel">
-            <div className="section-heading buybox-day-heading"><div><span className="eyebrow">今日维度</span><h2>Buy Box 监测</h2></div><span>{todayBuyBox.date || '等待上传'}</span></div>
-            <BuyBoxStatusSection title="Buy Box 丢失" items={todayBuyBox.lost} tone="lost" />
-            <BuyBoxStatusSection title="Buy Box 恢复" items={todayBuyBox.recovered} tone="recovered" />
-          </section>
-          <section className="buybox-day-panel buybox-yesterday-panel">
-            <div className="section-heading buybox-day-heading"><div><span className="eyebrow">昨日维度</span><h2>Buy Box 监测</h2></div><span>{yesterdayBuyBox.date || '尚未保存'}</span></div>
-            <BuyBoxStatusSection title="Buy Box 丢失" items={yesterdayBuyBox.lost} tone="lost" />
-            <BuyBoxStatusSection title="Buy Box 恢复" items={yesterdayBuyBox.recovered} tone="recovered" />
-          </section>
-        </section>
+              <section className="results-stack dashboard-results-stack">
+                <div className="table-panel full-span-panel">
+                  <div className="section-heading"><h2>检索结果</h2><span>{filteredRows.length} 条</span></div>
+                  <div className="data-table-wrap">
+                    <table className="data-table">
+                      <colgroup>
+                        <col style={{ width: `${resultColumnWidths.owner}px` }} />
+                        <col style={{ width: `${resultColumnWidths.sku}px` }} />
+                        <col style={{ width: `${resultColumnWidths.asinType}px` }} />
+                        <col style={{ width: `${resultColumnWidths.brand}px` }} />
+                        <col style={{ width: `${resultColumnWidths.asin}px` }} />
+                        <col style={{ width: `${resultColumnWidths.price}px` }} />
+                        <col style={{ width: `${resultColumnWidths.todayRank}px` }} />
+                        <col style={{ width: `${resultColumnWidths.yesterdayRank}px` }} />
+                      </colgroup>
+                      <thead><tr>{renderResultHeader('owner', '运营')}{renderResultHeader('sku', 'SKU')}{renderResultHeader('asinType', '类型')}{renderResultHeader('brand', '品牌')}{renderResultHeader('asin', 'ASIN')}{renderResultHeader('price', '价格')}{renderResultHeader('todayRank', '今日排名')}{renderResultHeader('yesterdayRank', '昨日排名')}</tr></thead>
+                      <tbody>{visibleRows.map((row, index) => {
+                        const previous = visibleRows[index - 1]
+                        const next = visibleRows[index + 1]
+                        const isGroupStart = !previous || previous.sku !== row.sku
+                        const isGroupEnd = !next || next.sku !== row.sku
+                        const typeClass = normalized(row.asinType).includes('kmasin') ? 'type-km' : normalized(row.asinType).includes('竞对') ? 'type-competitor' : 'type-neutral'
+                        const asinHistory = historyByAsin.get(normalized(row.asin))
+                        const priceChange = getMetricChange(asinHistory, 'price')
+                        return <tr className={`${row.asin === selectedAsin ? 'selected-row' : ''} ${isGroupStart ? 'sku-group-start' : ''} ${isGroupEnd ? 'sku-group-end' : ''}`} key={`${row.sku}-${row.asin}-${index}`} onClick={() => setSelectedAsin(row.asin)}><td>{row.owner || '-'}</td><td className="sku-cell">{row.sku}</td><td><span className={`type-tag ${typeClass}`}>{row.asinType || '-'}</span></td><td>{row.keepa?.brand || '-'}</td><td className="asin-cell"><button className="asin-trigger" type="button" onClick={(event) => {
+                          event.stopPropagation()
+                          setSelectedAsin(row.asin)
+                        }}>{row.asin}</button></td><td>{renderMetric(row.keepa?.price, priceChange, 'price')}</td><td>{renderRankComparison(row.keepa?.rank, row.yesterdayKeepa?.rank)}</td><td>{typeof row.yesterdayKeepa?.rank === 'number' ? row.yesterdayKeepa.rank.toLocaleString() : '-'}</td></tr>
+                      })}</tbody>
+                    </table>
+                  </div>
+                </div>
+              </section>
+
+              <section className="chart-grid">
+                <div className="chart-panel"><div className="section-heading"><h2>价格趋势</h2><span>Price</span></div><ResponsiveContainer height={230} width="100%"><LineChart data={selectedHistory}><CartesianGrid stroke="#e6ebf2" vertical={false} /><XAxis dataKey="date" tickLine={false} /><YAxis tickLine={false} width={54} /><Tooltip /><Line dataKey="price" stroke="#1f7a6d" strokeWidth={2.5} type="monotone" /></LineChart></ResponsiveContainer></div>
+                <div className="chart-panel"><div className="section-heading"><h2>排名趋势</h2><span>Rank</span></div><ResponsiveContainer height={230} width="100%"><AreaChart data={selectedHistory}><CartesianGrid stroke="#e6ebf2" vertical={false} /><XAxis dataKey="date" tickLine={false} /><YAxis tickLine={false} width={66} /><Tooltip /><Area dataKey="rank" fill="#dfeeea" stroke="#5067a3" strokeWidth={2.5} type="monotone" /></AreaChart></ResponsiveContainer></div>
+              </section>
+
+              {selectedRows[0] ? (
+                <section className="detail-panel asin-detail-card">
+                  <div className="section-heading"><h2>ASIN 详情</h2><span>{selectedRows[0].asin}</span></div>
+                  <div className="detail-stack">
+                    <div>
+                      <span className="eyebrow">商品</span>
+                      <h3>{selectedRows[0].keepa?.title || selectedRows[0].asin}</h3>
+                    </div>
+                    {getImageCandidates(selectedRows[0].keepa?.image).length ? (
+                      <div className="detail-image-wrap">
+                        <img
+                          alt={selectedRows[0].asin}
+                          className="detail-image"
+                          key={selectedRows[0].asin}
+                          onLoad={(event) => {
+                            event.currentTarget.style.display = 'block'
+                            event.currentTarget.dataset.index = '0'
+                          }}
+                          onError={(event) => {
+                            const candidates = getImageCandidates(selectedRows[0].keepa?.image)
+                            const currentIndex = Number(event.currentTarget.dataset.index || '0')
+                            const nextIndex = currentIndex + 1
+                            if (nextIndex < candidates.length) {
+                              event.currentTarget.dataset.index = String(nextIndex)
+                              event.currentTarget.src = candidates[nextIndex]
+                              return
+                            }
+                            event.currentTarget.style.display = 'none'
+                          }}
+                          src={getPrimaryImageUrl(selectedRows[0].keepa?.image)}
+                        />
+                      </div>
+                    ) : <div className="detail-image-wrap detail-image-empty">暂无主图</div>}
+                  </div>
+                </section>
+              ) : null}
+
+            </>
+          ) : null}
+
+          {activePage === 'data-update' ? (
+            <>
+              <header className="page-header-card">
+                <div>
+                  <span className="eyebrow">数据更新</span>
+                  <h2>上传 Keepa、映射信息和 SKU / ASIN 监控清单</h2>
+                </div>
+              </header>
+
+              <section className="stat-grid update-stat-grid">{updateStats.map((stat) => <div className="stat-card" key={stat.label}><span>{stat.label}</span><strong>{stat.value.toLocaleString()}</strong></div>)}</section>
+
+              <section className="erp-grid erp-grid-2">
+                <section className="sidebar-info-panel page-panel">
+                  <div className="panel-title"><Upload size={16} />数据上传</div>
+                  <div className="upload-stack">
+                    {(Object.keys(uploadLabels) as UploadKind[]).map((kind) => (
+                      <div className="upload-row" key={kind}>
+                        <label className="upload-button">
+                          <Upload size={16} />
+                          <span>{uploadLabels[kind]}</span>
+                          <input accept=".xlsx,.xls,.csv" type="file" onChange={(event) => { const file = event.currentTarget.files?.[0] ?? null; event.currentTarget.value = ''; void handleUpload(kind, file) }} />
+                        </label>
+                        <button className="icon-button" title={downloadLabels[kind]} type="button" onClick={() => handleSidebarDownload(kind)}>
+                          <Download size={16} />
+                        </button>
+                      </div>
+                    ))}
+                  </div>
+                </section>
+
+                <section className="sidebar-note-panel page-panel">
+                  <div className="panel-title"><AlertTriangle size={16} />缺少 Keepa</div>
+                  <strong>{missingKeepaItems.length}</strong>
+                  <p className="status-text">区分未出现在本次上传、已读取但价格缺失、已读取但排名缺失。</p>
+                  <button className="reset-button" type="button" onClick={() => exportMissingKeepaReport(missingKeepaItems)}>下载分类处理表</button>
+                </section>
+
+                <section className="sidebar-info-panel page-panel">
+                  <div className="panel-title"><FileSpreadsheet size={16} />同步摘要</div>
+                  <div className="sidebar-metric-list">
+                    <div className="sidebar-metric-item"><span>待补映射</span><strong>{unmatchedOnlineRows.length}</strong></div>
+                    <div className="sidebar-metric-item"><span>在线新增</span><strong>{onlineRows.length}</strong></div>
+                  </div>
+                </section>
+
+                <section className="sidebar-note-panel page-panel">
+                  <div className="panel-title"><Database size={16} />在线新增待补映射</div>
+                  <strong>{unmatchedOnlineRows.length}</strong>
+                  <p className="status-text">这些平台 SKU 已新增监控，但映射总表还没补齐。</p>
+                  <button className="reset-button" disabled={!unmatchedOnlineRows.length} type="button" onClick={() => exportUnmatchedOnlineRows(unmatchedOnlineRows)}>导出待补映射SKU</button>
+                </section>
+
+                <section className="sidebar-note-panel page-panel">
+                  <div className="panel-title"><AlertTriangle size={16} />重复监控关系</div>
+                  <strong>{duplicateItems.length}</strong>
+                  <p className="status-text">导出后可直接在剔重子表里处理，再重新上传覆盖。</p>
+                  <button className="reset-button" disabled={!duplicateItems.length} type="button" onClick={() => exportMonitorWithDuplicateMarks(combinedMonitorRows)}>导出重复处理表</button>
+                </section>
+
+                <section className="sidebar-info-panel page-panel">
+                  <div className="panel-title"><Upload size={16} />上传后说明</div>
+                  <div className="sidebar-upload-summary">
+                    {([
+                      ['yesterday', '昨日数据源'],
+                      ['today', '今日数据源'],
+                    ] as const).map(([key, label]) => {
+                      const report = keepaUploadReports[key]
+                      const statusLabel = report.status === 'success' ? '上传成功' : report.status === 'error' ? '上传失败' : report.status === 'processing' ? '解析中' : '等待上传'
+                      return (
+                        <section className={`sidebar-upload-role upload-role-${report.status}`} key={key}>
+                          <div className="sidebar-upload-role-heading"><strong>{label}</strong><span>{statusLabel}</span></div>
+                          <p>{report.fileName || '尚未选择文件'}</p>
+                          {report.status === 'success' ? <p>{report.date} · 已解析 {report.imported.toLocaleString()} 条</p> : null}
+                          {report.notes.length ? <ul className="report-list compact-report-list">{report.notes.map((note) => <li key={note}>{note}</li>)}</ul> : null}
+                          {report.errors.length ? <ul className="report-list report-error compact-report-list">{report.errors.map((error) => <li key={error}>{error}</li>)}</ul> : null}
+                        </section>
+                      )
+                    })}
+                    {uploadSummary.fileName && uploadSummary.kind !== 'keepa' ? (
+                      <div className="sidebar-upload-block">
+                        <span>其他文件</span>
+                        <p>{uploadLabels[uploadSummary.kind]} · {uploadSummary.fileName} · {uploadSummary.imported.toLocaleString()} 条</p>
+                        {uploadSummary.errors.length ? <ul className="report-list report-error compact-report-list">{uploadSummary.errors.map((error) => <li key={error}>{error}</li>)}</ul> : null}
+                      </div>
+                    ) : null}
+                  </div>
+                </section>
+              </section>
+            </>
+          ) : null}
+
+          {activePage === 'buybox' ? (
+            <section className="buybox-day-grid" aria-label="每日 Buy Box 监测">
+              <section className="buybox-day-panel buybox-today-panel">
+                <div className="section-heading buybox-day-heading"><div><span className="eyebrow">今日维度</span><h2>Buy Box 监测</h2></div><span>{todayBuyBox.date || '等待上传'}</span></div>
+                <BuyBoxStatusSection title="Buy Box 丢失" items={todayBuyBox.lost} tone="lost" />
+                <BuyBoxStatusSection title="Buy Box 恢复" items={todayBuyBox.recovered} tone="recovered" />
+              </section>
+              <section className="buybox-day-panel buybox-yesterday-panel">
+                <div className="section-heading buybox-day-heading"><div><span className="eyebrow">昨日维度</span><h2>Buy Box 监测</h2></div><span>{yesterdayBuyBox.date || '尚未保存'}</span></div>
+                <BuyBoxStatusSection title="Buy Box 丢失" items={yesterdayBuyBox.lost} tone="lost" />
+                <BuyBoxStatusSection title="Buy Box 恢复" items={yesterdayBuyBox.recovered} tone="recovered" />
+              </section>
+            </section>
+          ) : null}
+
+        </div>
       </section>
 
       {pendingKeepaUpload ? (
