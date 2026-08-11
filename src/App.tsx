@@ -1919,6 +1919,16 @@ function App() {
           </div>
         </section>
 
+        <section className="erp-nav-section">
+          <div className="panel-title"><Plus size={16} />添加监控ASIN</div>
+          <div className="erp-nav-list">
+            <button className={activePage === 'add-monitor' ? 'active-nav' : ''} type="button" onClick={() => openPage('add-monitor')}>
+              <Plus size={15} />添加监控ASIN
+              <span>{onlineRows.length}</span>
+            </button>
+          </div>
+        </section>
+
         <p className="status-text">{status}</p>
       </aside>
 
@@ -2143,6 +2153,73 @@ function App() {
             </section>
           ) : null}
 
+          {activePage === 'add-monitor' ? (
+            <>
+              <section className="editor-panel">
+                <div className="section-heading editor-heading">
+                  <div><span className="eyebrow">支持直接粘贴线下表格，平台SKU会自动匹配映射</span><h2>在线添加</h2></div>
+                  <div className="editor-actions">
+                    <button className="icon-command" title="重新匹配映射信息" type="button" onClick={refreshOnlineMappings}><RefreshCw className={isRefreshingOnline ? 'spin-icon' : ''} size={16} /></button>
+                    <button className="active-action" type="button" onClick={startBatchOnlineAdd}><FileSpreadsheet size={16} />在线批量添加</button>
+                    <button type="button" onClick={saveBatchOnlineRows}><Save size={16} />批量写入</button>
+                    <button type="button" onClick={() => exportOnlineImportTemplate(mappingRows)}><Download size={16} />批量导入模板</button>
+                  </div>
+                </div>
+                <div className="mini-table-wrap batch-online-wrap batch-entry-panel">
+                  <table className="data-table mini-table batch-entry-table">
+                    <colgroup>
+                      <col style={{ width: '18%' }} />
+                      <col style={{ width: '14%' }} />
+                      <col style={{ width: '18%' }} />
+                      <col style={{ width: '16%' }} />
+                      <col style={{ width: '16%' }} />
+                      <col style={{ width: '16%' }} />
+                      <col style={{ width: '72px' }} />
+                    </colgroup>
+                    <thead><tr><th>平台 SKU</th><th>ASIN 分类</th><th>ASIN</th><th>运营</th><th>组别</th><th>账号</th><th>操作</th></tr></thead>
+                    <tbody>{batchOnlineRows.map((row, index) => {
+                      const matched = mappingBySku.get(normalized(row.sku))
+                      const needsManual = Boolean(row.sku && !matched)
+                      return <tr key={`batch-${index}`}>
+                        <td><input className="table-input" placeholder="填写平台SKU" value={row.sku} onChange={(event) => updateBatchOnlineCell(index, 'sku', event.target.value)} onPaste={(event) => {
+                          const handled = handleBatchPaste(index, 'sku', event.clipboardData.getData('text'))
+                          if (handled) event.preventDefault()
+                        }} /></td>
+                        <td><select className="table-input" value={row.asinType} onChange={(event) => updateBatchOnlineCell(index, 'asinType', event.target.value)} onPaste={(event) => {
+                          const handled = handleBatchPaste(index, 'asinType', event.clipboardData.getData('text'))
+                          if (handled) event.preventDefault()
+                        }}><option value="">请选择</option><option value="竞对ASIN">竞对ASIN</option><option value="KMASIN">KMASIN</option></select></td>
+                        <td><input className="table-input" placeholder="填写ASIN，可直接粘贴整列" value={row.asin} onChange={(event) => updateBatchOnlineCell(index, 'asin', event.target.value)} onPaste={(event) => {
+                          const handled = handleBatchPaste(index, 'asin', event.clipboardData.getData('text'))
+                          if (handled) event.preventDefault()
+                        }} /></td>
+                        <td><input className={`table-input ${matched ? 'mapped-field' : ''}`} placeholder={needsManual ? '未匹配手动填写' : '自动匹配'} readOnly={Boolean(matched)} value={row.owner} onChange={(event) => updateBatchOnlineCell(index, 'owner', event.target.value)} onPaste={(event) => {
+                          const handled = handleBatchPaste(index, 'owner', event.clipboardData.getData('text'))
+                          if (handled) event.preventDefault()
+                        }} /></td>
+                        <td><input className={`table-input ${matched ? 'mapped-field' : ''}`} placeholder={needsManual ? '未匹配手动填写' : '自动匹配'} readOnly={Boolean(matched)} value={row.group} onChange={(event) => updateBatchOnlineCell(index, 'group', event.target.value)} onPaste={(event) => {
+                          const handled = handleBatchPaste(index, 'group', event.clipboardData.getData('text'))
+                          if (handled) event.preventDefault()
+                        }} /></td>
+                        <td><input className={`table-input ${matched ? 'mapped-field' : ''}`} placeholder={needsManual ? '未匹配手动填写' : '自动匹配'} readOnly={Boolean(matched)} value={row.account} onChange={(event) => updateBatchOnlineCell(index, 'account', event.target.value)} onPaste={(event) => {
+                          const handled = handleBatchPaste(index, 'account', event.clipboardData.getData('text'))
+                          if (handled) event.preventDefault()
+                        }} /></td>
+                        <td><button className="row-icon danger" title="删除本行" type="button" onClick={() => removeBatchOnlineLine(index)}><Trash2 size={14} /></button></td>
+                      </tr>
+                    })}</tbody>
+                  </table>
+                  <div className="batch-online-actions">
+                    <button type="button" onClick={addBatchOnlineLine}><Plus size={16} />新增一行</button>
+                  </div>
+                </div>
+                <div className="mini-table-wrap online-table-wrap"><table className="data-table mini-table"><thead><tr><th>平台 SKU</th><th>ASIN 分类</th><th>ASIN</th><th>账号</th><th>组别</th><th>运营</th><th>匹配状态</th><th>操作</th></tr></thead><tbody>{onlineRows.length ? onlineRows.map((row, index) => {
+                  const matched = mappingBySku.has(normalized(row.sku))
+                  return <tr key={`${monitorRowKey(row)}-${index}`}><td className="sku-cell">{row.sku}</td><td>{row.asinType}</td><td className="asin-cell">{row.asin}</td><td>{row.account || '-'}</td><td>{row.group || '-'}</td><td>{row.owner || '-'}</td><td>{matched ? <span className="source-tag source-tag-mapped">已映射</span> : <span className="source-tag source-tag-manual"><AlertTriangle size={13} />手动填写</span>}</td><td><button className="row-icon" title="编辑" type="button" onClick={() => startOnlineEdit(index)}><Edit3 size={14} /></button><button className="row-icon danger" title="删除" type="button" onClick={() => deleteOnlineRow(index)}><Trash2 size={14} /></button></td></tr>
+                }) : <tr><td className="empty-cell" colSpan={8}>暂无在线添加数据</td></tr>}</tbody></table></div>
+              </section>
+            </>
+          ) : null}
         </div>
       </section>
 
