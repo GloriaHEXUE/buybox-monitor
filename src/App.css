@@ -548,6 +548,23 @@
   grid-template-columns: repeat(6, minmax(0, 1fr));
 }
 
+.dashboard-reset-button {
+  min-height: 46px;
+  border: 1px solid #d7e0ea;
+  border-radius: 9px;
+  background: #f7fafc;
+  color: #1f2c3d;
+  font: inherit;
+  font-weight: 600;
+  cursor: pointer;
+  transition: border-color 0.16s ease, background 0.16s ease, box-shadow 0.16s ease;
+}
+
+.dashboard-reset-button:hover {
+  border-color: #9cb0c8;
+  background: #ffffff;
+}
+
 .topbar.compact-page-header {
   grid-template-columns: minmax(0, 1fr);
   padding: 8px 10px;
@@ -775,6 +792,34 @@
 .data-table-wrap {
   overflow: auto;
   max-height: 430px;
+}
+
+.resizable-results-wrap {
+  resize: vertical;
+  min-height: 280px;
+  max-height: 900px;
+}
+
+.results-resize-bar {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 10px;
+  padding: 8px 14px 12px;
+  border-top: 1px solid #edf1f6;
+  background: #fcfdff;
+}
+
+.results-resize-bar span {
+  min-width: 58px;
+  color: #6e7b8f;
+  font-size: 12px;
+  text-align: right;
+}
+
+.results-height-slider {
+  width: 180px;
+  accent-color: #4f6f95;
 }
 
 .data-table {
@@ -1367,6 +1412,21 @@
   color: #a33b32;
 }
 
+.editor-actions .upload-button {
+  min-height: 32px;
+  padding: 0 10px;
+  background: #ffffff;
+  border-color: #d7e0ea;
+  color: #17212f;
+}
+
+.editor-actions .upload-button:hover {
+  background: #f6f9fc;
+  border-color: #b9c8d8;
+  color: #17212f;
+  transform: none;
+}
+
 .batch-entry-panel {
   min-height: 520px;
   max-height: 520px;
@@ -1627,13 +1687,14 @@
 .column-resize-handle {
   position: absolute;
   top: 0;
-  right: -8px;
-  width: 14px;
+  right: -10px;
+  width: 20px;
   height: 100%;
   padding: 0;
   border: 0;
   background: transparent;
   cursor: col-resize;
+  z-index: 3;
 }
 
 .column-resize-handle::after {
@@ -1641,14 +1702,14 @@
   position: absolute;
   top: 8px;
   bottom: 8px;
-  right: 6px;
-  width: 2px;
+  right: 9px;
+  width: 3px;
   border-radius: 999px;
-  background: transparent;
+  background: rgba(155, 176, 199, 0.42);
 }
 
 .column-resize-handle:hover::after {
-  background: #9bb0c7;
+  background: #6f8db0;
 }
 
 .mini-table td:last-child {
@@ -1814,6 +1875,7 @@
   justify-content: space-between;
   gap: 6px;
   min-width: 70px;
+  padding-right: 12px;
 }
 
 .result-filter-button {
