@@ -1435,7 +1435,7 @@ function App() {
     monitorRows,
     onlineRows,
     sourceReports,
-    history: [],
+    history,
     todayBuyBox,
     yesterdayBuyBox,
     keepaUploadReports,
