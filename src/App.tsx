@@ -563,7 +563,22 @@ const toKeepaSnapshotRows = (rows: Array<KeepaRow | KeepaSnapshotRow> | undefine
   })).filter((row) => row.asin)
 
 const compactKeepaRowsForStorage = (rows: KeepaRow[]): KeepaRow[] =>
-  rows.map((row) => ({ ...row, image: '' }))
+  rows.map((row) => ({ ...row }))
+
+const formatSyncTime = (value: string) => {
+  if (!value) return '尚未同步'
+  const date = new Date(value)
+  if (Number.isNaN(date.getTime())) return value
+  return new Intl.DateTimeFormat('zh-CN', {
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+    second: '2-digit',
+    hour12: false,
+  }).format(date)
+}
 
 const deserializeStoredState = (raw: Partial<StoredState> | null | undefined): StoredState | null => {
   if (!raw) return null
@@ -1401,6 +1416,7 @@ function App() {
   const [isRefreshingOnline, setIsRefreshingOnline] = useState(false)
   const [uploadSummary, setUploadSummary] = useState<UploadSummary>(emptyUploadSummary)
   const [keepaUploadReports, setKeepaUploadReports] = useState<KeepaUploadReports>(initialState.keepaUploadReports)
+  const [sharedSyncAt, setSharedSyncAt] = useState('')
   const [resultFilters, setResultFilters] = useState<Record<ResultFilterKey, string>>({
     owner: '',
     sku: '',
@@ -1465,11 +1481,13 @@ function App() {
             setTodayBuyBox(nextState.todayBuyBox)
             setYesterdayBuyBox(nextState.yesterdayBuyBox)
             setKeepaUploadReports(nextState.keepaUploadReports)
+            setSharedSyncAt(String(remote.updated_at ?? ''))
             setStatus(`已从共享云端载入最新数据${remote.updated_at ? `（更新时间 ${remote.updated_at}）` : ''}。`)
           }
         } else {
           await writeSharedState(buildStoredStatePayload())
           if (!active) return
+          setSharedSyncAt(new Date().toISOString())
           setStatus(`已初始化共享云端数据表：${getSharedStateConfig().table}。`)
         }
       } catch (error) {
@@ -1503,7 +1521,9 @@ function App() {
     const payload = buildStoredStatePayload()
     const timer = window.setTimeout(() => {
       void writeSharedState(payload)
-        .then(() => undefined)
+        .then(() => {
+          setSharedSyncAt(new Date().toISOString())
+        })
         .catch((error) => {
           const message = error instanceof Error ? error.message : '共享云端数据写入失败。'
           setStatus(`共享数据写入失败，当前已保留在本地缓存。${message}`)
@@ -1759,6 +1779,8 @@ function App() {
     () => history.filter((point) => normalized(point.asin) === normalized(selectedAsin)),
     [history, selectedAsin],
   )
+
+  const historyDayCount = useMemo(() => new Set(history.map((point) => point.date)).size, [history])
 
   const historyByAsin = useMemo(() => {
     const grouped = new Map<string, HistoryPoint[]>()
@@ -2798,6 +2820,8 @@ function App() {
                     <div className="sidebar-metric-item"><span>待补映射</span><strong>{unmatchedOnlineRows.length}</strong></div>
                     <div className="sidebar-metric-item"><span>在线新增</span><strong>{onlineRows.length}</strong></div>
                     <div className="sidebar-metric-item"><span>历史无映射</span><strong>{unmatchedHistoricalRows.length}</strong></div>
+                    <div className="sidebar-metric-item"><span>趋势天数</span><strong>{historyDayCount}</strong></div>
+                    <div className="sidebar-metric-item"><span>云端同步</span><strong>{formatSyncTime(sharedSyncAt)}</strong></div>
                   </div>
                 </section>
 
