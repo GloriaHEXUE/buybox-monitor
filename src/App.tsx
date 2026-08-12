@@ -32,6 +32,12 @@ import {
 import { useRef } from 'react'
 import * as XLSX from 'xlsx'
 import seedData from './data/seedData.json'
+import {
+  getSharedStateConfig,
+  isSharedStateConfigured,
+  readSharedState,
+  writeSharedState,
+} from './lib/sharedState'
 import './App.css'
 
 type AnyRow = Record<string, unknown>
@@ -559,6 +565,59 @@ const toKeepaSnapshotRows = (rows: Array<KeepaRow | KeepaSnapshotRow> | undefine
 const compactKeepaRowsForStorage = (rows: KeepaRow[]): KeepaRow[] =>
   rows.map((row) => ({ ...row, image: '' }))
 
+const deserializeStoredState = (raw: Partial<StoredState> | null | undefined): StoredState | null => {
+  if (!raw) return null
+  const seedKeepaRows = normalizeKeepaRows(typedSeed.keepaRows)
+  const seedMonitorRows = expandMonitorRows(typedSeed.monitorRows)
+  const fallback: StoredState = {
+    keepaRows: seedKeepaRows,
+    yesterdayKeepaRows: [],
+    mappingRows: typedSeed.mappingRows,
+    monitorRows: seedMonitorRows,
+    onlineRows: [],
+    sourceReports: {
+      monitor: { fileName: 'seedData.json', imported: seedMonitorRows.length, updatedAt: '内置数据', source: 'seed' },
+      mapping: { fileName: 'seedData.json', imported: typedSeed.mappingRows.length, updatedAt: '内置数据', source: 'seed' },
+    },
+    history: initialHistory(seedKeepaRows),
+    todayBuyBox: emptyBuyBoxBoard(),
+    yesterdayBuyBox: emptyBuyBoxBoard(),
+    keepaUploadReports: emptyKeepaUploadReports(),
+  }
+
+  const storedKeepaRows = normalizeKeepaRows(raw.keepaRows)
+  const storedYesterdayRows = raw.yesterdayKeepaRows
+    ? toKeepaSnapshotRows(raw.yesterdayKeepaRows)
+    : raw.yesterdayBuyBox?.date && !raw.todayBuyBox?.date
+      ? toKeepaSnapshotRows(raw.keepaRows)
+      : []
+  const mappingRows = raw.mappingRows ?? fallback.mappingRows
+  const monitorRows = expandMonitorRows(raw.monitorRows ?? fallback.monitorRows)
+  const onlineRows = raw.onlineRows ?? fallback.onlineRows
+  const combinedMonitorRows = mergeMonitorRows(monitorRows, onlineRows)
+  const todayDate = String(raw.todayBuyBox?.date ?? '')
+  const yesterdayDate = String(raw.yesterdayBuyBox?.date ?? '')
+  return {
+    keepaRows: storedKeepaRows,
+    yesterdayKeepaRows: storedYesterdayRows,
+    mappingRows,
+    monitorRows,
+    onlineRows,
+    sourceReports: raw.sourceReports ?? fallback.sourceReports,
+    history: raw.history?.length ? keepRecentFiveDays(raw.history) : initialHistory(storedKeepaRows),
+    todayBuyBox: todayDate
+      ? buildBuyBoxBoard(combinedMonitorRows, mappingRows, storedKeepaRows, storedYesterdayRows, todayDate, 'changes')
+      : emptyBuyBoxBoard(),
+    yesterdayBuyBox: yesterdayDate
+      ? buildBuyBoxBoard(combinedMonitorRows, mappingRows, storedYesterdayRows, [], yesterdayDate, 'snapshot')
+      : emptyBuyBoxBoard(),
+    keepaUploadReports: {
+      yesterday: normalizeKeepaUploadReport(raw.keepaUploadReports?.yesterday),
+      today: normalizeKeepaUploadReport(raw.keepaUploadReports?.today),
+    },
+  }
+}
+
 const getImportDate = (fileName: string) => {
   const fileDate = fileName.match(/\d{4}-\d{2}-\d{2}/)?.[0]
   return fileDate ?? new Date().toLocaleDateString('sv-SE')
@@ -699,38 +758,7 @@ const loadInitialState = (): StoredState => {
   try {
     const raw = localStorage.getItem(storageKey)
     if (!raw) return fallback
-    const stored = JSON.parse(raw) as Partial<StoredState>
-    const storedKeepaRows = normalizeKeepaRows(stored.keepaRows)
-    const storedYesterdayRows = stored.yesterdayKeepaRows
-      ? toKeepaSnapshotRows(stored.yesterdayKeepaRows)
-      : stored.yesterdayBuyBox?.date && !stored.todayBuyBox?.date
-        ? toKeepaSnapshotRows(stored.keepaRows)
-        : []
-    const mappingRows = stored.mappingRows ?? fallback.mappingRows
-    const monitorRows = expandMonitorRows(stored.monitorRows ?? fallback.monitorRows)
-    const onlineRows = stored.onlineRows ?? fallback.onlineRows
-    const combinedMonitorRows = mergeMonitorRows(monitorRows, onlineRows)
-    const todayDate = String(stored.todayBuyBox?.date ?? '')
-    const yesterdayDate = String(stored.yesterdayBuyBox?.date ?? '')
-    return {
-      keepaRows: storedKeepaRows,
-      yesterdayKeepaRows: storedYesterdayRows,
-      mappingRows,
-      monitorRows,
-      onlineRows,
-      sourceReports: stored.sourceReports ?? fallback.sourceReports,
-      history: stored.history?.length ? keepRecentFiveDays(stored.history) : initialHistory(storedKeepaRows),
-      todayBuyBox: todayDate
-        ? buildBuyBoxBoard(combinedMonitorRows, mappingRows, storedKeepaRows, storedYesterdayRows, todayDate, 'changes')
-        : emptyBuyBoxBoard(),
-      yesterdayBuyBox: yesterdayDate
-        ? buildBuyBoxBoard(combinedMonitorRows, mappingRows, storedYesterdayRows, [], yesterdayDate, 'snapshot')
-        : emptyBuyBoxBoard(),
-      keepaUploadReports: {
-        yesterday: normalizeKeepaUploadReport(stored.keepaUploadReports?.yesterday),
-        today: normalizeKeepaUploadReport(stored.keepaUploadReports?.today),
-      },
-    }
+    return deserializeStoredState(JSON.parse(raw) as Partial<StoredState>) ?? fallback
   } catch {
     return fallback
   }
@@ -1395,29 +1423,94 @@ function App() {
     yesterdayRank: 130,
   })
   const [resultsPanelHeight, setResultsPanelHeight] = useState(430)
+  const [hasLoadedSharedState, setHasLoadedSharedState] = useState(false)
   const [status, setStatus] = useState(
     `已自动载入原 Excel：${initialState.monitorRows.length} 条监控清单、${initialState.mappingRows.length} 条映射、${initialState.keepaRows.length} 条 Keepa。趋势仅保留最近 5 天。`,
   )
 
+  const buildStoredStatePayload = (): StoredState => ({
+    keepaRows: compactKeepaRowsForStorage(keepaRows),
+    yesterdayKeepaRows,
+    mappingRows,
+    monitorRows,
+    onlineRows,
+    sourceReports,
+    history: [],
+    todayBuyBox,
+    yesterdayBuyBox,
+    keepaUploadReports,
+  })
+
   useEffect(() => {
-    const payload: StoredState = {
-      keepaRows: compactKeepaRowsForStorage(keepaRows),
-      yesterdayKeepaRows,
-      mappingRows,
-      monitorRows,
-      onlineRows,
-      sourceReports,
-      history: [],
-      todayBuyBox,
-      yesterdayBuyBox,
-      keepaUploadReports,
+    let active = true
+    if (!isSharedStateConfigured) {
+      setHasLoadedSharedState(true)
+      return undefined
     }
+
+    const loadSharedState = async () => {
+      try {
+        const remote = await readSharedState()
+        if (!active) return
+        if (remote?.payload) {
+          const nextState = deserializeStoredState(remote.payload as Partial<StoredState>)
+          if (nextState) {
+            setKeepaRows(nextState.keepaRows)
+            setYesterdayKeepaRows(nextState.yesterdayKeepaRows)
+            setMappingRows(nextState.mappingRows)
+            setMonitorRows(nextState.monitorRows)
+            setOnlineRows(nextState.onlineRows)
+            setSourceReports(nextState.sourceReports)
+            setHistory(nextState.history)
+            setTodayBuyBox(nextState.todayBuyBox)
+            setYesterdayBuyBox(nextState.yesterdayBuyBox)
+            setKeepaUploadReports(nextState.keepaUploadReports)
+            setStatus(`已从共享云端载入最新数据${remote.updated_at ? `（更新时间 ${remote.updated_at}）` : ''}。`)
+          }
+        } else {
+          await writeSharedState(buildStoredStatePayload())
+          if (!active) return
+          setStatus(`已初始化共享云端数据表：${getSharedStateConfig().table}。`)
+        }
+      } catch (error) {
+        if (!active) return
+        const message = error instanceof Error ? error.message : '共享云端数据读取失败。'
+        setStatus(`共享数据同步失败，当前先使用本地缓存。${message}`)
+      } finally {
+        if (!active) return
+        setHasLoadedSharedState(true)
+      }
+    }
+
+    void loadSharedState()
+
+    return () => {
+      active = false
+    }
+  }, [])
+
+  useEffect(() => {
+    const payload = buildStoredStatePayload()
     try {
       localStorage.setItem(storageKey, JSON.stringify(payload))
     } catch {
       setStatus('数据已在当前页面完成解析，但浏览器存储空间不足，刷新后可能无法保留。请清理浏览器缓存或减少数据后重新上传。')
     }
   }, [keepaRows, keepaUploadReports, mappingRows, monitorRows, onlineRows, sourceReports, todayBuyBox, yesterdayBuyBox, yesterdayKeepaRows])
+
+  useEffect(() => {
+    if (!isSharedStateConfigured || !hasLoadedSharedState) return undefined
+    const payload = buildStoredStatePayload()
+    const timer = window.setTimeout(() => {
+      void writeSharedState(payload)
+        .then(() => undefined)
+        .catch((error) => {
+          const message = error instanceof Error ? error.message : '共享云端数据写入失败。'
+          setStatus(`共享数据写入失败，当前已保留在本地缓存。${message}`)
+        })
+    }, 600)
+    return () => window.clearTimeout(timer)
+  }, [hasLoadedSharedState, keepaRows, keepaUploadReports, mappingRows, monitorRows, onlineRows, sourceReports, todayBuyBox, yesterdayBuyBox, yesterdayKeepaRows])
 
   useEffect(() => {
     if (!pendingKeepaUpload) return undefined
