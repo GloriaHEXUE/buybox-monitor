@@ -10,6 +10,7 @@ import {
   Database,
   Download,
   Edit3,
+  Eye,
   FileSpreadsheet,
   Plus,
   RefreshCw,
@@ -59,6 +60,12 @@ type MappingRow = {
   owner: string
   group: string
   account: string
+}
+
+type MappingIndex = {
+  bySku: Map<string, MappingRow[]>
+  bySystemSkuCandidate: Map<string, MappingRow[]>
+  rowOrder: Map<MappingRow, number>
 }
 
 type KeepaRow = {
@@ -120,7 +127,7 @@ type KeepaUploadReport = {
 
 type KeepaUploadReports = Record<'yesterday' | 'today', KeepaUploadReport>
 
-type ResultFilterKey = 'owner' | 'sku' | 'asinType' | 'brand' | 'asin' | 'price' | 'todayRank' | 'yesterdayRank'
+type ResultFilterKey = 'owner' | 'sku' | 'asinType' | 'brand' | 'asin' | 'price' | 'todayRank' | 'yesterdayRank' | 'stockStatus'
 
 type AlertItem = {
   id: string
@@ -162,13 +169,6 @@ type PendingKeepaUpload = {
   file: File
 }
 
-type HistoricalUnmatchedActionRow = {
-  sku: string
-  asinType: string
-  asin: string
-  action: string
-}
-
 type DuplicateActionRow = {
   sku: string
   asin: string
@@ -192,6 +192,31 @@ type SourceReport = {
 
 type SourceReports = Record<EditMode, SourceReport>
 
+type SourceUploadReport = {
+  status: 'idle' | 'processing' | 'success' | 'error'
+  fileName: string
+  imported: number
+  notes: string[]
+  errors: string[]
+}
+
+type SourceUploadReports = Record<EditMode, SourceUploadReport>
+
+type DataPreviewMode = EditMode | null
+
+type MonitorSyncReport = {
+  updatedAt: string
+  added: number
+  deleted: number
+  total: number
+  action: 'idle' | 'add' | 'delete' | 'import' | 'upload' | 'duplicate-cleanup' | 'migration'
+}
+
+type MonitorDailyAdditions = {
+  date: string
+  keys: string[]
+}
+
 type StoredState = {
   keepaRows: KeepaRow[]
   yesterdayKeepaRows: KeepaSnapshotRow[]
@@ -203,6 +228,8 @@ type StoredState = {
   todayBuyBox: BuyBoxDayBoard
   yesterdayBuyBox: BuyBoxDayBoard
   keepaUploadReports: KeepaUploadReports
+  monitorSyncReport: MonitorSyncReport
+  monitorDailyAdditions: MonitorDailyAdditions
 }
 
 const typedSeed = seedData as unknown as {
@@ -212,11 +239,22 @@ const typedSeed = seedData as unknown as {
 }
 
 const storageKey = 'buybox-monitor-state-v2'
+const mappingStorageKey = 'buybox-monitor-mapping-v1'
 
 const uploadLabels: Record<UploadKind, string> = {
   keepa: '每日 Keepa 数据源',
   mapping: '映射信息',
   monitor: 'SKU / ASIN 监控清单',
+}
+
+const monitorSyncActionLabels: Record<MonitorSyncReport['action'], string> = {
+  idle: '等待回传',
+  add: '在线添加',
+  delete: '在线删除',
+  import: '表格导入',
+  upload: '清单上传',
+  'duplicate-cleanup': '重复清理',
+  migration: '旧数据合并',
 }
 
 const workspacePageLabels: Record<WorkspacePage, string> = {
@@ -234,6 +272,7 @@ const downloadLabels: Record<UploadKind, string> = {
 
 const monitorHeaders = ['运营', '组别', '账号', '平台SKU', 'Bundle主SKU', 'ASIN分类', 'ASIN', '备注']
 const mappingHeaders = ['平台SKU', '系统SKU', '运营', '小组', '店铺别名']
+const mappingRequiredHeaders = ['平台SKU', '系统SKU', '运营', '小组', '店铺别名']
 const keepaHeaders = ['ASIN', 'Title', 'Brand', 'New: Current', 'Sales Rank: Subcategory Sales Ranks', 'Buy Box Seller', 'Coupon', 'Prime Price', 'Image']
 const keepaFieldCandidates = {
   asin: ['ASIN', 'asin', 'Product Codes: ASIN', 'Product Codes ASIN'],
@@ -331,7 +370,7 @@ const readWorkbookRows = async (file: File, kind: EditMode | 'monitor'): Promise
   const normalizedRowHitCount = (row: (string | number | boolean | null)[]) => {
     const cells = row.map((cell) => normalized(cell))
     return candidateGroups.reduce((count, group) => {
-      const matched = group.some((candidate) => cells.some((cell) => cell === normalized(candidate) || cell.includes(normalized(candidate))))
+      const matched = group.some((candidate) => cells.some((cell) => cell === normalized(candidate)))
       return count + (matched ? 1 : 0)
     }, 0)
   }
@@ -432,6 +471,57 @@ const parseMapping = (rows: AnyRow[]): MappingRow[] =>
     }))
     .filter((row) => row.sku)
 
+const mappingCompositeKey = (row: Pick<MappingRow, 'sku' | 'account'>) =>
+  `${normalized(row.sku)}::${normalized(row.account)}`
+
+const mappingAssignmentKey = (row: MappingRow) =>
+  `${normalized(row.sku)}::${normalized(row.systemSku)}::${normalized(row.owner)}::${normalized(row.group)}::${normalized(row.account)}`
+
+const uniqueMappingRows = (rows: MappingRow[]) => {
+  const seen = new Set<string>()
+  return rows.filter((row) => {
+    const key = mappingAssignmentKey(row)
+    if (seen.has(key)) return false
+    seen.add(key)
+    return true
+  })
+}
+
+const analyzeMappingRows = (rows: AnyRow[], parsedRows: MappingRow[]) => {
+  const missingHeaders = mappingRequiredHeaders.filter((header) =>
+    !Object.keys(rows[0] ?? {}).some((key) => normalized(key) === normalized(header)),
+  )
+  const dataRows = rows.filter((row) => Object.values(row).some((value) => String(value ?? '').trim()))
+  const invalidRows = dataRows.flatMap((row, index) => {
+    const parsed = parseMapping([row])[0]
+    const missing = [
+      ['平台SKU', parsed?.sku],
+      ['系统SKU', parsed?.systemSku],
+      ['运营', parsed?.owner],
+      ['小组', parsed?.group],
+      ['店铺别名', parsed?.account],
+    ].filter(([, value]) => !value).map(([label]) => label)
+    return missing.length ? [{ row: index + 1, missing }] : []
+  })
+  const compositeGroups = new Map<string, MappingRow[]>()
+  for (const row of parsedRows) {
+    const key = mappingCompositeKey(row)
+    compositeGroups.set(key, [...(compositeGroups.get(key) ?? []), row])
+  }
+  const compositeConflicts = [...compositeGroups.entries()].filter(([, group]) =>
+    new Set(group.map(mappingAssignmentKey)).size > 1,
+  )
+  const skuGroups = new Map<string, MappingRow[]>()
+  for (const row of parsedRows) {
+    const key = normalized(row.sku)
+    skuGroups.set(key, [...(skuGroups.get(key) ?? []), row])
+  }
+  const multiAccountSkus = [...skuGroups.values()].filter((group) =>
+    new Set(group.map((row) => normalized(row.account))).size > 1,
+  ).length
+  return { missingHeaders, invalidRows, compositeConflicts, multiAccountSkus }
+}
+
 const splitMultiValueCell = (value: string) =>
   value
     .split(/[\r\n/;,，；]+/)
@@ -475,12 +565,27 @@ const mergeMonitorRows = (sourceRows: MonitorRow[], onlineRows: MonitorRow[]) =>
   return [...sourceRows, ...onlineRows.filter((row) => !sourceKeys.has(monitorRowKey(row)))]
 }
 
+const upsertMonitorRows = (currentRows: MonitorRow[], incomingRows: MonitorRow[]) => {
+  const next = [...currentRows]
+  const addedRows: MonitorRow[] = []
+  for (const row of incomingRows) {
+    const duplicateIndex = next.findIndex((item) => monitorRowKey(item) === monitorRowKey(row))
+    if (duplicateIndex >= 0) next[duplicateIndex] = row
+    else {
+      next.unshift(row)
+      addedRows.push(row)
+    }
+  }
+  return { rows: next, added: addedRows.length, addedRows }
+}
+
 const getSystemSkuCandidatesFromPlatformSku = (sku: string) => {
   const raw = sku.trim()
   if (!raw) return []
   const candidates = new Set<string>([raw])
   const prefixStripped = [
     raw.replace(/^KM1/i, ''),
+    raw.replace(/^KM2/i, ''),
     raw.replace(/^KM/i, ''),
     raw.replace(/^UTV1/i, ''),
     raw.replace(/^UTV/i, ''),
@@ -494,29 +599,92 @@ const getSystemSkuCandidatesFromPlatformSku = (sku: string) => {
   return [...candidates]
 }
 
-const applyMappingsToMonitorRows = (rows: MonitorRow[], mappings: MappingRow[]) => {
-  const bySku = new Map(mappings.map((row) => [normalized(row.sku), row]))
-  const bySystemSku = new Map(mappings.map((row) => [normalized(row.systemSku), row]))
+const appendMappingIndexEntry = (index: Map<string, MappingRow[]>, key: string, row: MappingRow) => {
+  if (!key) return
+  const matches = index.get(key)
+  if (matches) matches.push(row)
+  else index.set(key, [row])
+}
+
+const createMappingIndex = (mappings: MappingRow[]): MappingIndex => {
+  const bySku = new Map<string, MappingRow[]>()
+  const bySystemSkuCandidate = new Map<string, MappingRow[]>()
+  const rowOrder = new Map<MappingRow, number>()
+
+  mappings.forEach((mapping, index) => {
+    rowOrder.set(mapping, index)
+    appendMappingIndexEntry(bySku, normalized(mapping.sku), mapping)
+    const systemCandidates = new Set(
+      getSystemSkuCandidatesFromPlatformSku(mapping.systemSku).map(normalized).filter(Boolean),
+    )
+    systemCandidates.forEach((candidate) => appendMappingIndexEntry(bySystemSkuCandidate, candidate, mapping))
+  })
+
+  return { bySku, bySystemSkuCandidate, rowOrder }
+}
+
+const getIndexedSystemMatches = (sku: string, mappingIndex: MappingIndex) => {
+  const matches = new Set<MappingRow>()
+  const candidates = new Set(getSystemSkuCandidatesFromPlatformSku(sku).map(normalized).filter(Boolean))
+  candidates.forEach((candidate) => {
+    mappingIndex.bySystemSkuCandidate.get(candidate)?.forEach((mapping) => matches.add(mapping))
+  })
+  return [...matches].sort(
+    (left, right) => (mappingIndex.rowOrder.get(left) ?? 0) - (mappingIndex.rowOrder.get(right) ?? 0),
+  )
+}
+
+const resolveDirectMapping = (row: Pick<MonitorRow, 'sku' | 'account'>, mappingIndex: MappingIndex) => {
+  const sku = normalized(row.sku)
+  const account = normalized(row.account)
+  const exactSku = mappingIndex.bySku.get(sku) ?? []
+  const exactAccount = account ? exactSku.filter((mapping) => normalized(mapping.account) === account) : []
+  if (exactAccount.length === 1) return { mapping: exactAccount[0], status: 'exact' as const, candidates: exactAccount }
+  if (exactSku.length === 1) return { mapping: exactSku[0], status: 'unique' as const, candidates: exactSku }
+  if (exactSku.length > 1) return { mapping: null, status: 'ambiguous' as const, candidates: exactSku }
+
+  const systemMatches = getIndexedSystemMatches(row.sku, mappingIndex)
+  const systemAccount = account ? systemMatches.filter((mapping) => normalized(mapping.account) === account) : []
+  if (systemAccount.length === 1) return { mapping: systemAccount[0], status: 'system-exact' as const, candidates: systemAccount }
+  if (systemMatches.length === 1) return { mapping: systemMatches[0], status: 'system-unique' as const, candidates: systemMatches }
+  if (systemMatches.length > 1) return { mapping: null, status: 'ambiguous' as const, candidates: systemMatches }
+  return { mapping: null, status: 'missing' as const, candidates: [] }
+}
+
+const getCompositePrimarySku = (sku: string) => {
+  const parts = sku.split(/[+＋]/).map((part) => part.trim()).filter(Boolean)
+  return parts.length > 1 ? parts[0] : ''
+}
+
+const resolveMapping = (row: Pick<MonitorRow, 'sku' | 'account'>, mappingIndex: MappingIndex) => {
+  const direct = resolveDirectMapping(row, mappingIndex)
+  if (direct.mapping || direct.status === 'ambiguous') {
+    return { ...direct, matchedSku: direct.mapping ? row.sku.trim() : '' }
+  }
+
+  const primarySku = getCompositePrimarySku(row.sku)
+  if (!primarySku) return { ...direct, matchedSku: '' }
+  const primary = resolveDirectMapping({ sku: primarySku, account: row.account }, mappingIndex)
+  if (primary.mapping) return { ...primary, status: 'composite-primary' as const, matchedSku: primarySku }
+  return { ...primary, matchedSku: primary.status === 'ambiguous' ? primarySku : '' }
+}
+
+const applyMappingsToMonitorRows = (rows: MonitorRow[], mappingIndex: MappingIndex) => {
   return rows.map((row) => {
-    const mapping =
-      bySku.get(normalized(row.sku)) ??
-      getSystemSkuCandidatesFromPlatformSku(row.sku)
-        .map((candidate) => bySystemSku.get(normalized(candidate)))
-        .find(Boolean)
+    const mapping = resolveMapping(row, mappingIndex).mapping
     return mapping
       ? {
           ...row,
-          sku: mapping.sku,
-          owner: mapping.owner,
-          group: mapping.group,
-          account: mapping.account,
+          owner: row.owner || mapping.owner,
+          group: row.group || mapping.group,
+          account: row.account || mapping.account,
         }
       : row
   })
 }
 
-const applyMappingsToOnlineRows = (rows: MonitorRow[], mappings: MappingRow[]) => {
-  return applyMappingsToMonitorRows(rows, mappings)
+const applyMappingsToOnlineRows = (rows: MonitorRow[], mappingIndex: MappingIndex) => {
+  return applyMappingsToMonitorRows(rows, mappingIndex)
 }
 
 const initialHistory = (keepaRows: KeepaRow[]): HistoryPoint[] => {
@@ -580,6 +748,30 @@ const formatSyncTime = (value: string) => {
   }).format(date)
 }
 
+const emptyMonitorSyncReport = (total = 0): MonitorSyncReport => ({
+  updatedAt: '',
+  added: 0,
+  deleted: 0,
+  total,
+  action: 'idle',
+})
+
+const emptyMonitorDailyAdditions = (): MonitorDailyAdditions => ({
+  date: new Date().toLocaleDateString('sv-SE'),
+  keys: [],
+})
+
+const normalizeMonitorSyncReport = (
+  report: Partial<MonitorSyncReport> | null | undefined,
+  total: number,
+): MonitorSyncReport => ({
+  updatedAt: String(report?.updatedAt ?? ''),
+  added: Number.isFinite(report?.added) ? Number(report?.added) : 0,
+  deleted: Number.isFinite(report?.deleted) ? Number(report?.deleted) : 0,
+  total,
+  action: report?.action ?? 'idle',
+})
+
 const deserializeStoredState = (raw: Partial<StoredState> | null | undefined): StoredState | null => {
   if (!raw) return null
   const seedKeepaRows = normalizeKeepaRows(typedSeed.keepaRows)
@@ -598,6 +790,8 @@ const deserializeStoredState = (raw: Partial<StoredState> | null | undefined): S
     todayBuyBox: emptyBuyBoxBoard(),
     yesterdayBuyBox: emptyBuyBoxBoard(),
     keepaUploadReports: emptyKeepaUploadReports(),
+    monitorSyncReport: emptyMonitorSyncReport(seedMonitorRows.length),
+    monitorDailyAdditions: emptyMonitorDailyAdditions(),
   }
 
   const storedKeepaRows = normalizeKeepaRows(raw.keepaRows)
@@ -607,9 +801,11 @@ const deserializeStoredState = (raw: Partial<StoredState> | null | undefined): S
       ? toKeepaSnapshotRows(raw.keepaRows)
       : []
   const mappingRows = raw.mappingRows ?? fallback.mappingRows
-  const monitorRows = expandMonitorRows(raw.monitorRows ?? fallback.monitorRows)
-  const onlineRows = raw.onlineRows ?? fallback.onlineRows
-  const combinedMonitorRows = mergeMonitorRows(monitorRows, onlineRows)
+  const storedMonitorRows = expandMonitorRows(raw.monitorRows ?? fallback.monitorRows)
+  const legacyOnlineRows = expandMonitorRows(raw.onlineRows ?? fallback.onlineRows)
+  const monitorRows = mergeMonitorRows(storedMonitorRows, legacyOnlineRows)
+  const mappingIndex = createMappingIndex(mappingRows)
+  const migratedCount = monitorRows.length - storedMonitorRows.length
   const todayDate = String(raw.todayBuyBox?.date ?? '')
   const yesterdayDate = String(raw.yesterdayBuyBox?.date ?? '')
   return {
@@ -617,18 +813,33 @@ const deserializeStoredState = (raw: Partial<StoredState> | null | undefined): S
     yesterdayKeepaRows: storedYesterdayRows,
     mappingRows,
     monitorRows,
-    onlineRows,
+    onlineRows: [],
     sourceReports: raw.sourceReports ?? fallback.sourceReports,
     history: raw.history?.length ? keepRecentFiveDays(raw.history) : initialHistory(storedKeepaRows),
     todayBuyBox: todayDate
-      ? buildBuyBoxBoard(combinedMonitorRows, mappingRows, storedKeepaRows, storedYesterdayRows, todayDate, 'changes')
+      ? buildBuyBoxBoard(monitorRows, mappingIndex, storedKeepaRows, storedYesterdayRows, todayDate, 'changes')
       : emptyBuyBoxBoard(),
     yesterdayBuyBox: yesterdayDate
-      ? buildBuyBoxBoard(combinedMonitorRows, mappingRows, storedYesterdayRows, [], yesterdayDate, 'snapshot')
+      ? buildBuyBoxBoard(monitorRows, mappingIndex, storedYesterdayRows, [], yesterdayDate, 'snapshot')
       : emptyBuyBoxBoard(),
     keepaUploadReports: {
       yesterday: normalizeKeepaUploadReport(raw.keepaUploadReports?.yesterday),
       today: normalizeKeepaUploadReport(raw.keepaUploadReports?.today),
+    },
+    monitorSyncReport: migratedCount
+      ? {
+          updatedAt: new Date().toISOString(),
+          added: migratedCount,
+          deleted: 0,
+          total: monitorRows.length,
+          action: 'migration',
+        }
+      : normalizeMonitorSyncReport(raw.monitorSyncReport, monitorRows.length),
+    monitorDailyAdditions: {
+      date: String(raw.monitorDailyAdditions?.date ?? ''),
+      keys: Array.isArray(raw.monitorDailyAdditions?.keys)
+        ? [...new Set(raw.monitorDailyAdditions.keys.map(String).filter(Boolean))]
+        : [],
     },
   }
 }
@@ -640,7 +851,7 @@ const getImportDate = (fileName: string) => {
 
 const buildBuyBoxBoard = (
   monitorRows: MonitorRow[],
-  mappingRows: MappingRow[],
+  mappingIndex: MappingIndex,
   currentRows: Array<KeepaRow | KeepaSnapshotRow>,
   previousRows: Array<KeepaRow | KeepaSnapshotRow>,
   date: string,
@@ -648,7 +859,6 @@ const buildBuyBoxBoard = (
 ): BuyBoxDayBoard => {
   const currentByAsin = new Map(currentRows.map((row) => [normalized(row.asin), row.newCurrent]))
   const previousByAsin = new Map(previousRows.map((row) => [normalized(row.asin), row.newCurrent]))
-  const mappingBySku = new Map(mappingRows.map((row) => [normalized(row.sku), row]))
   const lost: BuyBoxStatusItem[] = []
   const recovered: BuyBoxStatusItem[] = []
   const seen = new Set<string>()
@@ -664,7 +874,7 @@ const buildBuyBoxBoard = (
     const newCurrent = currentByAsin.get(asinKey)
     const item: BuyBoxStatusItem = {
       id: `buybox-${itemKey}`,
-      owner: row.owner || mappingBySku.get(normalized(row.sku))?.owner || '',
+      owner: row.owner || resolveMapping(row, mappingIndex).mapping?.owner || '',
       sku: row.sku,
       asin: row.asin,
       newCurrent: newCurrent ?? null,
@@ -709,20 +919,12 @@ const getDirectMetricChange = (
 }
 
 const getRuleMatch = (row: MonitorRow, mapping?: MappingRow, keepa?: KeepaRow): RuleMatch => {
-  if (mapping) {
+  if (row.owner || row.group || row.account || mapping) {
     return {
-      owner: mapping.owner,
-      group: mapping.group,
-      account: mapping.account,
-      source: '平台SKU映射',
-    }
-  }
-  if (row.owner || row.group || row.account) {
-    return {
-      owner: row.owner,
-      group: row.group,
-      account: row.account,
-      source: '监控清单精确值',
+      owner: row.owner || mapping?.owner || '',
+      group: row.group || mapping?.group || '',
+      account: row.account || mapping?.account || '',
+      source: row.owner && row.group && row.account ? '监控清单精确值' : '监控清单 + 映射补空值',
     }
   }
   const title = normalized(keepa?.title)
@@ -769,11 +971,26 @@ const loadInitialState = (): StoredState => {
     todayBuyBox: emptyBuyBoxBoard(),
     yesterdayBuyBox: emptyBuyBoxBoard(),
     keepaUploadReports: emptyKeepaUploadReports(),
+    monitorSyncReport: emptyMonitorSyncReport(seedMonitorRows.length),
+    monitorDailyAdditions: emptyMonitorDailyAdditions(),
   }
   try {
     const raw = localStorage.getItem(storageKey)
-    if (!raw) return fallback
-    return deserializeStoredState(JSON.parse(raw) as Partial<StoredState>) ?? fallback
+    const storedState = raw
+      ? deserializeStoredState(JSON.parse(raw) as Partial<StoredState>) ?? fallback
+      : fallback
+    const rawMapping = localStorage.getItem(mappingStorageKey)
+    if (!rawMapping) return storedState
+    const mappingSnapshot = JSON.parse(rawMapping) as { rows?: MappingRow[]; report?: SourceReport }
+    if (!Array.isArray(mappingSnapshot.rows) || !mappingSnapshot.rows.length) return storedState
+    return {
+      ...storedState,
+      mappingRows: mappingSnapshot.rows,
+      sourceReports: {
+        ...storedState.sourceReports,
+        ...(mappingSnapshot.report ? { mapping: mappingSnapshot.report } : {}),
+      },
+    }
   } catch {
     return fallback
   }
@@ -817,6 +1034,19 @@ const emptyKeepaUploadReports = (): KeepaUploadReports => ({
   today: emptyKeepaUploadReport(),
 })
 
+const emptySourceUploadReport = (): SourceUploadReport => ({
+  status: 'idle',
+  fileName: '',
+  imported: 0,
+  notes: [],
+  errors: [],
+})
+
+const emptySourceUploadReports = (): SourceUploadReports => ({
+  mapping: emptySourceUploadReport(),
+  monitor: emptySourceUploadReport(),
+})
+
 const normalizeKeepaUploadReport = (report: KeepaUploadReport | undefined): KeepaUploadReport => ({
   status: report?.status ?? 'idle',
   fileName: String(report?.fileName ?? ''),
@@ -834,7 +1064,14 @@ const downloadTemplate = (kind: UploadKind) => {
       : kind === 'mapping'
         ? ['KM1B0901-06205-BK', 'B0901-06205-BK', 'SYZ1525【Zuri】', 'Polaris 1组', '老三-US']
         : ['B0CZSN3KZV', 'Product title', 'KEMIMOTO', 52.99, 265881, 'KEMIMOTO', '$5', 43.69, 'https://...']
-  const sheet = XLSX.utils.aoa_to_sheet([headers, example])
+  const guidance = kind === 'mapping'
+    ? ['填写说明：平台SKU + 店铺别名共同构成唯一匹配键；五个字段均为必填。上传会在完整校验成功后一次性覆盖旧映射，失败时旧数据保持不变。']
+    : []
+  const sheet = XLSX.utils.aoa_to_sheet([...(guidance.length ? [guidance] : []), headers, example])
+  sheet['!cols'] = kind === 'mapping'
+    ? [{ wch: 26 }, { wch: 24 }, { wch: 22 }, { wch: 24 }, { wch: 20 }]
+    : undefined
+  sheet['!autofilter'] = { ref: guidance.length ? `A2:${XLSX.utils.encode_col(headers.length - 1)}2` : `A1:${XLSX.utils.encode_col(headers.length - 1)}1` }
   const workbook = XLSX.utils.book_new()
   XLSX.utils.book_append_sheet(workbook, sheet, '模板')
   XLSX.writeFile(workbook, `${uploadLabels[kind]}模板.xlsx`)
@@ -995,137 +1232,7 @@ const exportUnmatchedOnlineRows = (rows: MonitorRow[]) => {
   XLSX.writeFile(workbook, '在线新增待补映射平台SKU.xlsx')
 }
 
-const exportHistoricalUnmatchedRows = async (rows: MonitorRow[], keepaRows: KeepaRow[]) => {
-  const ExcelJS = await import('exceljs')
-  const keepaByAsin = new Map(keepaRows.map((row) => [normalized(row.asin), row]))
-  const exportRows = rows.map((row) => {
-    const keepa = keepaByAsin.get(normalized(row.asin))
-    const hasPriceToday = typeof keepa?.price === 'number' || typeof keepa?.newCurrent === 'number'
-    return {
-      平台SKU: row.sku,
-      ASIN分类: row.asinType,
-      ASIN: row.asin,
-      备注: row.note,
-      当前运营: row.owner,
-      当前组别: row.group,
-      当前账号: row.account,
-      今日Keepa状态: hasPriceToday ? '可抓到价格，疑似仍在售' : '今日未抓到有效价格',
-      处理建议: hasPriceToday
-        ? '该ASIN在导入的Keepa中仍能抓到价格，建议运营先更新ERP平台SKU映射'
-        : '该ASIN在今日Keepa未抓到有效价格，建议运营前台检查是否在售。',
-      处理动作: '',
-    }
-  })
-  const workbook = new ExcelJS.Workbook()
-  const sheet = workbook.addWorksheet('历史监控无映射')
-  const optionSheet = workbook.addWorksheet('处理动作说明')
-  const headers = Object.keys(exportRows[0] ?? {})
-
-  sheet.addRow(headers)
-  exportRows.forEach((row) => sheet.addRow(headers.map((header) => row[header as keyof typeof row])))
-  optionSheet.addRows([
-    ['处理动作可选值'],
-    ['删除'],
-    ['保留'],
-  ])
-
-  sheet.getRow(1).font = { bold: true }
-  optionSheet.getRow(1).font = { bold: true }
-  sheet.views = [{ state: 'frozen', ySplit: 1 }]
-
-  headers.forEach((header, index) => {
-    const column = sheet.getColumn(index + 1)
-    const maxLength = Math.max(
-      header.length,
-      ...exportRows.map((row) => String(row[header as keyof typeof row] ?? '').length),
-    )
-    column.width = Math.min(Math.max(maxLength + 2, 12), 42)
-  })
-  optionSheet.getColumn(1).width = 22
-
-  const actionColumnIndex = headers.indexOf('处理动作') + 1
-  if (actionColumnIndex > 0) {
-    for (let rowIndex = 2; rowIndex <= exportRows.length + 1; rowIndex += 1) {
-      sheet.getCell(rowIndex, actionColumnIndex).dataValidation = {
-        type: 'list',
-        allowBlank: true,
-        formulae: ['\'处理动作说明\'!$A$2:$A$3'],
-        showErrorMessage: true,
-        errorStyle: 'error',
-        errorTitle: '仅可选择预设动作',
-        error: '处理动作只允许填写“删除”或“保留”。',
-        showInputMessage: true,
-        promptTitle: '处理动作',
-        prompt: '请选择“删除”或“保留”。',
-      }
-    }
-  }
-
-  const buffer = await workbook.xlsx.writeBuffer()
-  downloadArrayBufferFile(buffer as ArrayBuffer, '历史监控数据当前无映射检查表.xlsx')
-}
-
-const parseHistoricalUnmatchedActionRows = (rows: AnyRow[]): HistoricalUnmatchedActionRow[] =>
-  rows
-    .map((row) => ({
-      sku: String(pick(row, ['平台SKU', 'SKU', 'sku']) || '').trim(),
-      asinType: String(pick(row, ['ASIN分类', 'ASIN 分类', '类型']) || '').trim(),
-      asin: String(pick(row, ['ASIN', 'asin']) || '').trim(),
-      action: String(pick(row, ['处理动作', '操作', '处理结果']) || '').trim(),
-    }))
-    .filter((row) => row.sku && row.asin && row.asinType && row.action)
-
 const normalizeAction = (value: string) => normalized(value).replace(/\s+/g, '')
-
-const applyHistoricalUnmatchedActions = (
-  baseRows: MonitorRow[],
-  actionRows: HistoricalUnmatchedActionRow[],
-) => {
-  const touchedSkuActions = new Map<string, HistoricalUnmatchedActionRow[]>()
-  actionRows.forEach((row) => {
-    const skuKey = normalized(row.sku)
-    touchedSkuActions.set(skuKey, [...(touchedSkuActions.get(skuKey) ?? []), row])
-  })
-
-  const nextRows: MonitorRow[] = []
-  const deletedSkus = new Set<string>()
-  const keptSkus = new Set<string>()
-
-  const skuPlans = new Map<string, { mode: 'delete' | 'keep' }>()
-  for (const [skuKey, rows] of touchedSkuActions.entries()) {
-    const normalizedActions = rows.map((row) => normalizeAction(row.action))
-    if (normalizedActions.some((action) => action.includes('删除'))) {
-      skuPlans.set(skuKey, { mode: 'delete' })
-      continue
-    }
-    if (normalizedActions.some((action) => action === '保留')) {
-      skuPlans.set(skuKey, { mode: 'keep' })
-    }
-  }
-
-  for (const row of baseRows) {
-    const skuPlan = skuPlans.get(normalized(row.sku))
-    if (!skuPlan) {
-      nextRows.push(row)
-      continue
-    }
-
-    if (skuPlan.mode === 'delete') {
-      deletedSkus.add(row.sku)
-      continue
-    }
-
-    keptSkus.add(row.sku)
-    nextRows.push(row)
-  }
-
-  return {
-    rows: nextRows,
-    deletedSkus: [...deletedSkus],
-    keptSkus: [...keptSkus],
-    touchedCount: actionRows.length,
-  }
-}
 
 const parseDuplicateActionRows = (rows: AnyRow[]): DuplicateActionRow[] =>
   rows
@@ -1395,8 +1502,9 @@ function App() {
   const [yesterdayKeepaRows, setYesterdayKeepaRows] = useState<KeepaSnapshotRow[]>(initialState.yesterdayKeepaRows)
   const [mappingRows, setMappingRows] = useState<MappingRow[]>(initialState.mappingRows)
   const [monitorRows, setMonitorRows] = useState<MonitorRow[]>(initialState.monitorRows)
-  const [onlineRows, setOnlineRows] = useState<MonitorRow[]>(initialState.onlineRows)
   const [sourceReports, setSourceReports] = useState<SourceReports>(initialState.sourceReports)
+  const [monitorSyncReport, setMonitorSyncReport] = useState<MonitorSyncReport>(initialState.monitorSyncReport)
+  const [monitorDailyAdditions, setMonitorDailyAdditions] = useState<MonitorDailyAdditions>(initialState.monitorDailyAdditions)
   const [history, setHistory] = useState<HistoryPoint[]>(initialState.history)
   const [todayBuyBox, setTodayBuyBox] = useState<BuyBoxDayBoard>(initialState.todayBuyBox)
   const [yesterdayBuyBox, setYesterdayBuyBox] = useState<BuyBoxDayBoard>(initialState.yesterdayBuyBox)
@@ -1416,6 +1524,10 @@ function App() {
   const [isRefreshingOnline, setIsRefreshingOnline] = useState(false)
   const [uploadSummary, setUploadSummary] = useState<UploadSummary>(emptyUploadSummary)
   const [keepaUploadReports, setKeepaUploadReports] = useState<KeepaUploadReports>(initialState.keepaUploadReports)
+  const [sourceUploadReports, setSourceUploadReports] = useState<SourceUploadReports>(emptySourceUploadReports)
+  const [dataPreviewMode, setDataPreviewMode] = useState<DataPreviewMode>(null)
+  const [pendingMonitorDelete, setPendingMonitorDelete] = useState<MonitorRow[] | null>(null)
+  const [selectedMonitorRowKeys, setSelectedMonitorRowKeys] = useState<string[]>([])
   const [sharedSyncAt, setSharedSyncAt] = useState('')
   const [resultFilters, setResultFilters] = useState<Record<ResultFilterKey, string>>({
     owner: '',
@@ -1426,6 +1538,7 @@ function App() {
     price: '',
     todayRank: '',
     yesterdayRank: '',
+    stockStatus: '',
   })
   const [openResultFilter, setOpenResultFilter] = useState<ResultFilterKey | null>(null)
   const [resultColumnWidths, setResultColumnWidths] = useState<Record<ResultColumnKey, number>>({
@@ -1437,6 +1550,7 @@ function App() {
     price: 148,
     todayRank: 130,
     yesterdayRank: 130,
+    stockStatus: 112,
   })
   const [resultsPanelHeight, setResultsPanelHeight] = useState(430)
   const [hasLoadedSharedState, setHasLoadedSharedState] = useState(false)
@@ -1449,12 +1563,14 @@ function App() {
     yesterdayKeepaRows,
     mappingRows,
     monitorRows,
-    onlineRows,
+    onlineRows: [],
     sourceReports,
     history,
     todayBuyBox,
     yesterdayBuyBox,
     keepaUploadReports,
+    monitorSyncReport,
+    monitorDailyAdditions,
   })
 
   useEffect(() => {
@@ -1475,8 +1591,9 @@ function App() {
             setYesterdayKeepaRows(nextState.yesterdayKeepaRows)
             setMappingRows(nextState.mappingRows)
             setMonitorRows(nextState.monitorRows)
-            setOnlineRows(nextState.onlineRows)
             setSourceReports(nextState.sourceReports)
+            setMonitorSyncReport(nextState.monitorSyncReport)
+            setMonitorDailyAdditions(nextState.monitorDailyAdditions)
             setHistory(nextState.history)
             setTodayBuyBox(nextState.todayBuyBox)
             setYesterdayBuyBox(nextState.yesterdayBuyBox)
@@ -1512,9 +1629,17 @@ function App() {
     try {
       localStorage.setItem(storageKey, JSON.stringify(payload))
     } catch {
-      setStatus('数据已在当前页面完成解析，但浏览器存储空间不足，刷新后可能无法保留。请清理浏览器缓存或减少数据后重新上传。')
+      setStatus('数据已在当前页面完成解析；完整状态超过浏览器容量，但映射信息将继续使用独立缓存保留。')
     }
-  }, [keepaRows, keepaUploadReports, mappingRows, monitorRows, onlineRows, sourceReports, todayBuyBox, yesterdayBuyBox, yesterdayKeepaRows])
+  }, [keepaRows, keepaUploadReports, mappingRows, monitorDailyAdditions, monitorRows, monitorSyncReport, sourceReports, todayBuyBox, yesterdayBuyBox, yesterdayKeepaRows])
+
+  useEffect(() => {
+    try {
+      localStorage.setItem(mappingStorageKey, JSON.stringify({ rows: mappingRows, report: sourceReports.mapping }))
+    } catch {
+      setStatus('映射已在当前页面更新，但浏览器无法保存独立映射缓存；请导出映射备份后检查浏览器存储空间。')
+    }
+  }, [mappingRows, sourceReports.mapping])
 
   useEffect(() => {
     if (!isSharedStateConfigured || !hasLoadedSharedState) return undefined
@@ -1530,42 +1655,47 @@ function App() {
         })
     }, 600)
     return () => window.clearTimeout(timer)
-  }, [hasLoadedSharedState, keepaRows, keepaUploadReports, mappingRows, monitorRows, onlineRows, sourceReports, todayBuyBox, yesterdayBuyBox, yesterdayKeepaRows])
+  }, [hasLoadedSharedState, keepaRows, keepaUploadReports, mappingRows, monitorDailyAdditions, monitorRows, monitorSyncReport, sourceReports, todayBuyBox, yesterdayBuyBox, yesterdayKeepaRows])
 
   useEffect(() => {
-    if (!pendingKeepaUpload) return undefined
+    if (!pendingKeepaUpload && !pendingMonitorDelete) return undefined
     const closeOnEscape = (event: KeyboardEvent) => {
-      if (event.key === 'Escape') cancelKeepaUpload()
+      if (event.key === 'Escape') {
+        if (pendingMonitorDelete) setPendingMonitorDelete(null)
+        else cancelKeepaUpload()
+      }
     }
     document.addEventListener('keydown', closeOnEscape)
     return () => document.removeEventListener('keydown', closeOnEscape)
-  }, [pendingKeepaUpload])
+  }, [pendingKeepaUpload, pendingMonitorDelete])
 
   const keepaByAsin = useMemo(() => new Map(keepaRows.map((row) => [normalized(row.asin), row])), [keepaRows])
   const yesterdayKeepaByAsin = useMemo(
     () => new Map(yesterdayKeepaRows.map((row) => [normalized(row.asin), row])),
     [yesterdayKeepaRows],
   )
-  const mappingBySku = useMemo(() => new Map(mappingRows.map((row) => [normalized(row.sku), row])), [mappingRows])
+  const mappingIndex = useMemo(() => createMappingIndex(mappingRows), [mappingRows])
   const mappedMonitorRows = useMemo(
-    () => applyMappingsToMonitorRows(monitorRows, mappingRows),
-    [mappingRows, monitorRows],
+    () => applyMappingsToMonitorRows(monitorRows, mappingIndex),
+    [mappingIndex, monitorRows],
   )
-  const mappedOnlineRows = useMemo(
-    () => applyMappingsToOnlineRows(onlineRows, mappingRows),
-    [mappingRows, onlineRows],
-  )
-  const combinedMonitorRows = useMemo(
-    () => mergeMonitorRows(mappedMonitorRows, mappedOnlineRows),
-    [mappedMonitorRows, mappedOnlineRows],
-  )
+  const combinedMonitorRows = mappedMonitorRows
+  const todayAddedMonitorRows = useMemo(() => {
+    const today = new Date().toLocaleDateString('sv-SE')
+    if (monitorDailyAdditions.date !== today) return []
+    const byKey = new Map(monitorRows.map((row) => [monitorRowKey(row), row]))
+    return monitorDailyAdditions.keys.flatMap((key) => {
+      const row = byKey.get(key)
+      return row ? [row] : []
+    })
+  }, [monitorDailyAdditions, monitorRows])
   const resizingColumnRef = useRef<{ key: ResultColumnKey; startX: number; startWidth: number } | null>(null)
 
   useEffect(() => {
     if (yesterdayBuyBox.date && yesterdayKeepaRows.length) {
       setYesterdayBuyBox(buildBuyBoxBoard(
         combinedMonitorRows,
-        mappingRows,
+        mappingIndex,
         yesterdayKeepaRows,
         [],
         yesterdayBuyBox.date,
@@ -1575,21 +1705,22 @@ function App() {
     if (todayBuyBox.date && keepaRows.length) {
       setTodayBuyBox(buildBuyBoxBoard(
         combinedMonitorRows,
-        mappingRows,
+        mappingIndex,
         keepaRows,
         yesterdayKeepaRows,
         todayBuyBox.date,
         'changes',
       ))
     }
-  }, [combinedMonitorRows, keepaRows, mappingRows, todayBuyBox.date, yesterdayBuyBox.date, yesterdayKeepaRows])
+  }, [combinedMonitorRows, keepaRows, mappingIndex, todayBuyBox.date, yesterdayBuyBox.date, yesterdayKeepaRows])
 
   const enrichedRows = useMemo(
     () =>
       combinedMonitorRows.map((row) => {
         const keepa = keepaByAsin.get(normalized(row.asin))
         const yesterdayKeepa = yesterdayKeepaByAsin.get(normalized(row.asin))
-        const mapping = mappingBySku.get(normalized(row.sku))
+        const mappingResult = resolveMapping(row, mappingIndex)
+        const mapping = mappingResult.mapping ?? undefined
         const ruleMatch = getRuleMatch(row, mapping, keepa)
         return {
           ...row,
@@ -1600,9 +1731,12 @@ function App() {
           keepa,
           yesterdayKeepa,
           hasMapping: Boolean(mapping),
+          stockStatus: mapping ? '备货' : '不备货',
+          mappingStatus: mappingResult.status,
+          matchedSku: mappingResult.matchedSku,
         }
       }),
-    [combinedMonitorRows, keepaByAsin, mappingBySku, yesterdayKeepaByAsin],
+    [combinedMonitorRows, keepaByAsin, mappingIndex, yesterdayKeepaByAsin],
   )
 
   const filteredRows = useMemo(() => {
@@ -1628,7 +1762,8 @@ function App() {
         (!columnNeedles.asin || normalized(row.asin).includes(columnNeedles.asin)) &&
         (!columnNeedles.price || normalized(price).includes(columnNeedles.price)) &&
         (!columnNeedles.todayRank || normalized(todayRank).includes(columnNeedles.todayRank)) &&
-        (!columnNeedles.yesterdayRank || normalized(yesterdayRank).includes(columnNeedles.yesterdayRank))
+        (!columnNeedles.yesterdayRank || normalized(yesterdayRank).includes(columnNeedles.yesterdayRank)) &&
+        (!columnNeedles.stockStatus || normalized(row.stockStatus).includes(columnNeedles.stockStatus))
 
       return matchesColumns &&
         (!ownerNeedle || normalized(row.owner).includes(ownerNeedle)) &&
@@ -1988,13 +2123,22 @@ function App() {
   )
 
   const unmatchedOnlineRows = useMemo(
-    () => mappedOnlineRows.filter((row) => !mappingBySku.has(normalized(row.sku))),
-    [mappedOnlineRows, mappingBySku],
+    () => {
+      const seenSkus = new Set<string>()
+      return enrichedRows.filter((row) => {
+        if (row.hasMapping) return false
+        const skuKey = normalized(row.sku)
+        if (!skuKey || seenSkus.has(skuKey)) return false
+        seenSkus.add(skuKey)
+        return true
+      })
+    },
+    [enrichedRows],
   )
 
-  const unmatchedHistoricalRows = useMemo(
-    () => mappedMonitorRows.filter((row) => !mappingBySku.has(normalized(row.sku))),
-    [mappedMonitorRows, mappingBySku],
+  const ambiguousMonitorRows = useMemo(
+    () => enrichedRows.filter((row) => row.mappingStatus === 'ambiguous'),
+    [enrichedRows],
   )
 
   const openPage = (page: WorkspacePage) => {
@@ -2024,6 +2168,8 @@ function App() {
   }
 
   const visibleRows = filteredRows.slice(0, 180)
+  const visibleRowKeys = visibleRows.map(monitorRowKey)
+  const allVisibleRowsSelected = Boolean(visibleRowKeys.length) && visibleRowKeys.every((key) => selectedMonitorRowKeys.includes(key))
 
   const renderMetric = (value: number | null | undefined, change: MetricChange | null, format: 'price' | 'rank') => {
     if (typeof value !== 'number') return '-'
@@ -2104,6 +2250,34 @@ function App() {
     )
   }
 
+  const recordMonitorSync = (
+    action: MonitorSyncReport['action'],
+    added: number,
+    deleted: number,
+    total: number,
+  ) => {
+    const updatedAt = new Date().toISOString()
+    setMonitorSyncReport({ updatedAt, added, deleted, total, action })
+    setSourceReports((current) => ({
+      ...current,
+      monitor: {
+        ...current.monitor,
+        imported: total,
+        updatedAt: formatSyncTime(updatedAt),
+      },
+    }))
+  }
+
+  const recordDailyMonitorAdditions = (rows: MonitorRow[]) => {
+    if (!rows.length) return
+    const date = new Date().toLocaleDateString('sv-SE')
+    const nextKeys = rows.map(monitorRowKey)
+    setMonitorDailyAdditions((current) => ({
+      date,
+      keys: [...new Set([...(current.date === date ? current.keys : []), ...nextKeys])],
+    }))
+  }
+
   const importKeepaFile = async (
     file: File,
     target: 'today' | 'yesterday',
@@ -2129,7 +2303,7 @@ function App() {
       const previousRows = target === 'today' ? yesterdayKeepaRows : []
       const nextBoard = buildBuyBoxBoard(
         combinedMonitorRows,
-        mappingRows,
+        mappingIndex,
         parsed,
         previousRows,
         date,
@@ -2236,42 +2410,6 @@ function App() {
     }
   }
 
-  const handleHistoricalUnmatchedRefreshUpload = async (file: File | null) => {
-    if (!file) return
-    setStatus(`正在解析 ${file.name} ...`)
-    try {
-      const rows = await readWorkbookRows(file, 'monitor')
-      const actions = parseHistoricalUnmatchedActionRows(rows)
-      if (!actions.length) throw new Error('未识别到有效处理动作，请填写“处理动作”后再上传。')
-      const result = applyHistoricalUnmatchedActions(monitorRows, actions)
-      setMonitorRows(result.rows)
-      setSelectedAsin(result.rows[0]?.asin ?? onlineRows[0]?.asin ?? '')
-      const noteLines = [
-        `已处理 ${result.touchedCount} 条历史无映射指令`,
-        result.deletedSkus.length ? `删除平台SKU ${result.deletedSkus.length} 个` : '',
-        result.keptSkus.length ? `保留平台SKU ${result.keptSkus.length} 个，等待你后续刷新最新映射表` : '',
-      ].filter(Boolean)
-      setUploadSummary({
-        kind: 'monitor',
-        fileName: file.name,
-        imported: result.rows.length,
-        notes: noteLines,
-        errors: [],
-      })
-      setStatus(noteLines.join('；'))
-    } catch (error) {
-      const message = error instanceof Error ? error.message : '历史监控无映射处理表解析失败，原有监控未改变。'
-      setUploadSummary({
-        kind: 'monitor',
-        fileName: file.name,
-        imported: 0,
-        notes: ['本次历史监控无映射回传未写入，现有监控清单保持不变。'],
-        errors: [message],
-      })
-      setStatus(message)
-    }
-  }
-
   const handleDuplicateRefreshUpload = async (file: File | null) => {
     if (!file) return
     setStatus(`正在解析 ${file.name} ...`)
@@ -2279,10 +2417,10 @@ function App() {
       const rows = await readWorkbookRows(file, 'monitor')
       const actions = parseDuplicateActionRows(rows)
       if (!actions.length) throw new Error('未识别到有效重复监控处理动作，请填写“剔除”或“保留”后再上传。')
-      const result = applyDuplicateActionsAcrossSources(monitorRows, onlineRows, actions)
+      const result = applyDuplicateActionsAcrossSources(monitorRows, [], actions)
       setMonitorRows(result.monitorRows)
-      setOnlineRows(result.onlineRows)
-      setSelectedAsin(result.monitorRows[0]?.asin ?? result.onlineRows[0]?.asin ?? '')
+      setSelectedAsin(result.monitorRows[0]?.asin ?? '')
+      recordMonitorSync('duplicate-cleanup', 0, monitorRows.length - result.monitorRows.length, result.monitorRows.length)
       const noteLines = [
         `已处理 ${result.touchedCount} 条重复监控指令`,
         result.removedKeys.length ? `已剔除重复监控组 ${result.removedKeys.length} 个` : '',
@@ -2291,7 +2429,7 @@ function App() {
       setUploadSummary({
         kind: 'monitor',
         fileName: file.name,
-        imported: result.monitorRows.length + result.onlineRows.length,
+        imported: result.monitorRows.length,
         notes: noteLines,
         errors: [],
       })
@@ -2316,32 +2454,28 @@ function App() {
       const rows = await readWorkbookRows(file, 'monitor')
       const parsed = parseMonitor(rows)
       if (!parsed.length) throw new Error('批量导入表未识别到有效的平台SKU、ASIN分类与ASIN。')
-      const mappedParsed = applyMappingsToOnlineRows(parsed, mappingRows).map((row) => ({
+      const mappedParsed = applyMappingsToOnlineRows(parsed, mappingIndex).map((row) => ({
         ...row,
         note: row.note || '批量导入',
       }))
-      setOnlineRows((current) => {
-        let next = [...current]
-        for (const row of mappedParsed) {
-          const duplicateIndex = next.findIndex((item) => monitorRowKey(item) === monitorRowKey(row))
-          if (duplicateIndex >= 0) next[duplicateIndex] = row
-          else next = [row, ...next]
-        }
-        return next
-      })
+      const result = upsertMonitorRows(monitorRows, mappedParsed)
+      setMonitorRows(result.rows)
+      recordDailyMonitorAdditions(result.addedRows)
+      recordMonitorSync('import', result.added, 0, result.rows.length)
       setSelectedAsin(mappedParsed[0]?.asin ?? '')
       setUploadSummary({
         kind: 'monitor',
         fileName: file.name,
         imported: mappedParsed.length,
         notes: [
-          `已导入 ${mappedParsed.length} 条监控关系到在线监控`,
-          '导入后已按当前映射信息自动匹配运营、组别、账号',
+          `已解析 ${mappedParsed.length} 条，其中新增 ${result.added} 条`,
+          '已写回完整 SKU / ASIN 监控清单，并进入云端自动同步队列',
+          '运营、组别、账号优先保留导入值，仅空值使用当前映射补齐',
           '若平台SKU暂无映射，将保留手动填写或待后续映射刷新',
         ],
         errors: [],
       })
-      setStatus(`已导入 ${mappedParsed.length} 条在线监控，并自动完成映射匹配。`)
+      setStatus(`已导入 ${mappedParsed.length} 条监控关系，新增 ${result.added} 条；完整监控清单共 ${result.rows.length} 条。`)
     } catch (error) {
       const message = error instanceof Error ? error.message : '批量导入表解析失败，现有在线监控未改变。'
       setUploadSummary({
@@ -2363,57 +2497,96 @@ function App() {
       return
     }
     setStatus(`正在解析 ${file.name} ...`)
+    setSourceUploadReports((current) => ({
+      ...current,
+      [kind]: { status: 'processing', fileName: file.name, imported: 0, notes: ['正在完整校验文件，现有云端数据暂不变更。'], errors: [] },
+    }))
     try {
       const rows = await readWorkbookRows(file, kind)
       const updatedAt = new Date().toLocaleString('zh-CN', { hour12: false })
       if (kind === 'mapping') {
         const parsed = parseMapping(rows)
         if (!parsed.length) throw new Error('映射文件没有识别到有效的平台 SKU 行，现有映射信息未改变。')
-        setMappingRows(parsed)
-        setMonitorRows((current) => applyMappingsToMonitorRows(current, parsed))
-        setOnlineRows((current) => applyMappingsToOnlineRows(current, parsed))
+        const analysis = analyzeMappingRows(rows, parsed)
+        if (analysis.missingHeaders.length) throw new Error(`映射模板缺少必填列：${analysis.missingHeaders.join('、')}。请下载统一模板后重试，现有映射未改变。`)
+        if (analysis.invalidRows.length) {
+          const samples = analysis.invalidRows.slice(0, 5).map((item) => `数据第 ${item.row} 行缺少${item.missing.join('/')}`).join('；')
+          throw new Error(`映射文件有 ${analysis.invalidRows.length} 行必填字段不完整：${samples}${analysis.invalidRows.length > 5 ? '……' : ''}。现有映射未改变。`)
+        }
+        if (analysis.compositeConflicts.length) throw new Error(`发现 ${analysis.compositeConflicts.length} 个“平台SKU + 店铺别名”重复且归属冲突，无法安全覆盖。现有映射未改变。`)
+        const validated = uniqueMappingRows(parsed)
+        const validatedIndex = createMappingIndex(validated)
+        setMappingRows(validated)
+        setMonitorRows((current) => applyMappingsToMonitorRows(current, validatedIndex))
         setSourceReports((current) => ({
           ...current,
-          mapping: { fileName: file.name, imported: parsed.length, updatedAt, source: 'upload' },
+          mapping: { fileName: file.name, imported: validated.length, updatedAt, source: 'upload' },
         }))
+        const notes = [
+          `完整校验通过，固定映射源由原 ${mappingRows.length} 条替换为 ${validated.length} 条`,
+          `唯一键：平台SKU + 店铺别名；跨账号重复 SKU ${analysis.multiAccountSkus} 个`,
+          `精确重复行已去重 ${parsed.length - validated.length} 条；复合键归属冲突 0 个`,
+          isSharedStateConfigured
+            ? '监控清单原归属未被覆盖，仅空字段已补齐；变更进入云端自动同步队列'
+            : '监控清单原归属未被覆盖，仅空字段已补齐并保存本地；当前环境未配置 Supabase',
+        ]
         setUploadSummary({
           kind,
           fileName: file.name,
-          imported: parsed.length,
-          notes: [
-            `固定映射源已替换为 ${parsed.length} 条记录`,
-            '固定监控清单已按最新平台SKU映射同步刷新运营、组别、账号',
-            '在线添加数据已自动重新匹配运营、组别、账号',
-            '当前按“平台SKU -> 运营 / 小组 / 店铺别名”自动匹配在线新增记录',
-          ],
+          imported: validated.length,
+          notes,
           errors: [],
         })
-        setStatus(`已更新固定映射源：${parsed.length} 条；固定监控与在线数据已按最新映射同步刷新。`)
+        setSourceUploadReports((current) => ({ ...current, mapping: { status: 'success', fileName: file.name, imported: validated.length, notes, errors: [] } }))
+        setStatus(
+          `映射上传成功：${validated.length} 条；监控清单已有运营、组别、账号保持不变，仅补齐空字段${isSharedStateConfigured ? '并等待云端同步' : '，当前已保存本地（云端未配置）'}。`,
+        )
       }
       if (kind === 'monitor') {
         const parsed = parseMonitor(rows)
         if (!parsed.length) throw new Error('监控清单没有识别到有效的 SKU 和 ASIN，现有固定监控源未改变。')
-        setMonitorRows(parsed)
-        setSelectedAsin(parsed[0]?.asin ?? onlineRows[0]?.asin ?? '')
+        const prepared = applyMappingsToMonitorRows(parsed, mappingIndex)
+        const previousKeys = new Set(monitorRows.map(monitorRowKey))
+        const nextKeys = new Set(prepared.map(monitorRowKey))
+        const added = prepared.filter((row) => !previousKeys.has(monitorRowKey(row))).length
+        const deleted = monitorRows.filter((row) => !nextKeys.has(monitorRowKey(row))).length
+        setMonitorRows(prepared)
+        recordMonitorSync('upload', added, deleted, prepared.length)
+        setSelectedAsin(prepared[0]?.asin ?? '')
         setSourceReports((current) => ({
           ...current,
-          monitor: { fileName: file.name, imported: parsed.length, updatedAt, source: 'upload' },
+          monitor: { fileName: file.name, imported: prepared.length, updatedAt, source: 'upload' },
         }))
         setUploadSummary({
           kind,
           fileName: file.name,
-          imported: parsed.length,
+          imported: prepared.length,
           notes: [
-            `固定监控源已替换为 ${parsed.length} 条关系`,
-            `保留在线添加 ${onlineRows.length} 条，汇总时自动合并`,
+            `完整监控清单已替换为 ${prepared.length} 条关系`,
+            `相较替换前新增 ${added} 条、移除 ${deleted} 条`,
+            '上传值为运营归属依据，仅空字段使用映射信息补齐',
           ],
           errors: [],
         })
-        setStatus(`已更新固定监控源：${parsed.length} 条；在线添加 ${onlineRows.length} 条保持不变。`)
+        setSourceUploadReports((current) => ({
+          ...current,
+          monitor: {
+            status: 'success',
+            fileName: file.name,
+            imported: prepared.length,
+            notes: [`完整监控清单已替换为 ${prepared.length} 条关系`, `相较替换前新增 ${added} 条、移除 ${deleted} 条`],
+            errors: [],
+          },
+        }))
+        setStatus(`已更新完整监控清单：${prepared.length} 条；新增 ${added} 条、移除 ${deleted} 条。`)
       }
     } catch (error) {
       const message = error instanceof Error ? error.message : `${uploadLabels[kind]}解析失败，原有数据未改变。`
       setUploadSummary({ kind, fileName: file.name, imported: 0, notes: ['本次上传未写入，固定数据源保持不变。'], errors: [message] })
+      setSourceUploadReports((current) => ({
+        ...current,
+        [kind]: { status: 'error', fileName: file.name, imported: 0, notes: ['本次上传未写入，原有本地与云端数据保持不变。'], errors: [message] },
+      }))
       setStatus(message)
     }
   }
@@ -2430,8 +2603,7 @@ function App() {
     setStatus('已取消本次 Keepa 上传，当前今日和昨日数据未改变。')
   }
 
-  const startOnlineEdit = (index: number) => {
-    const target = onlineRows[index] ?? emptyOnlineMonitor
+  const startOnlineEdit = (target: MonitorRow) => {
     setBatchOnlineRows([
       { ...target },
       ...Array.from({ length: 7 }, () => ({ ...emptyOnlineMonitor })),
@@ -2446,14 +2618,14 @@ function App() {
   const updateBatchOnlineCell = (index: number, key: keyof MonitorRow, value: string) => {
     setBatchOnlineRows((rows) => rows.map((row, rowIndex) => {
       if (rowIndex !== index) return row
-      if (key === 'sku') {
-        const mapping = mappingBySku.get(normalized(value))
+      if (key === 'sku' || key === 'account') {
+        const nextRow = { ...row, [key]: value }
+        const mapping = resolveMapping(nextRow, mappingIndex).mapping
         return {
-          ...row,
-          sku: value,
-          owner: mapping?.owner ?? row.owner,
-          group: mapping?.group ?? row.group,
-          account: mapping?.account ?? row.account,
+          ...nextRow,
+          owner: nextRow.owner || mapping?.owner || '',
+          group: nextRow.group || mapping?.group || '',
+          account: nextRow.account || mapping?.account || '',
         }
       }
       return { ...row, [key]: value }
@@ -2474,13 +2646,13 @@ function App() {
     while (rows.length <= rowIndex) rows.push({ ...emptyOnlineMonitor })
     const next = rows[rowIndex]
     if (key === 'sku') {
-      const mapping = mappingBySku.get(normalized(value))
+      const mapping = resolveMapping({ sku: value, account: next.account }, mappingIndex).mapping
       rows[rowIndex] = {
         ...next,
         sku: value,
-        owner: mapping?.owner ?? next.owner,
-        group: mapping?.group ?? next.group,
-        account: mapping?.account ?? next.account,
+        owner: next.owner || mapping?.owner || '',
+        group: next.group || mapping?.group || '',
+        account: next.account || mapping?.account || '',
       }
       return
     }
@@ -2511,15 +2683,15 @@ function App() {
   const saveBatchOnlineRows = () => {
     const prepared = batchOnlineRows
       .map((row) => {
-        const mapping = mappingBySku.get(normalized(row.sku))
+        const mapping = resolveMapping(row, mappingIndex).mapping
         return {
           ...row,
           sku: row.sku.trim(),
           asinType: row.asinType.trim(),
           asin: row.asin.trim(),
-          owner: (mapping?.owner ?? row.owner).trim(),
-          group: (mapping?.group ?? row.group).trim(),
-          account: (mapping?.account ?? row.account).trim(),
+          owner: (row.owner || mapping?.owner || '').trim(),
+          group: (row.group || mapping?.group || '').trim(),
+          account: (row.account || mapping?.account || '').trim(),
           note: row.note || '在线批量添加',
         }
       })
@@ -2546,35 +2718,72 @@ function App() {
       seen.add(key)
     }
 
-    setOnlineRows((rows) => {
-      let next = [...rows]
-      for (const row of prepared) {
-        const duplicateIndex = next.findIndex((item) => monitorRowKey(item) === monitorRowKey(row))
-        if (duplicateIndex >= 0) next[duplicateIndex] = row
-        else next = [row, ...next]
-      }
-      return next
-    })
+    const result = upsertMonitorRows(monitorRows, prepared)
+    setMonitorRows(result.rows)
+    recordDailyMonitorAdditions(result.addedRows)
+    recordMonitorSync('add', result.added, 0, result.rows.length)
     setSelectedAsin(prepared[0]?.asin ?? '')
     setBatchOnlineRows(Array.from({ length: 8 }, () => ({ ...emptyOnlineMonitor })))
-    setStatus(`已保存 ${prepared.length} 条在线监控，并同步到监控汇总。`)
+    setStatus(`已保存 ${prepared.length} 条监控关系，其中新增 ${result.added} 条；已写回完整监控清单并等待云端同步。`)
   }
 
-  const deleteOnlineRow = (index: number) => {
-    setOnlineRows((rows) => rows.filter((_, rowIndex) => rowIndex !== index))
-    setStatus('已删除在线记录，固定监控源未改变。')
+  const requestMonitorDelete = (row: MonitorRow) => {
+    setPendingMonitorDelete([row])
+  }
+
+  const toggleMonitorRowSelection = (row: MonitorRow, checked: boolean) => {
+    const key = monitorRowKey(row)
+    setSelectedMonitorRowKeys((current) => checked
+      ? [...new Set([...current, key])]
+      : current.filter((item) => item !== key))
+  }
+
+  const toggleVisibleMonitorRows = (checked: boolean) => {
+    setSelectedMonitorRowKeys((current) => checked
+      ? [...new Set([...current, ...visibleRowKeys])]
+      : current.filter((key) => !visibleRowKeys.includes(key)))
+  }
+
+  const requestSelectedMonitorRowsDelete = () => {
+    if (!selectedMonitorRowKeys.length) return
+    const selectedKeys = new Set(selectedMonitorRowKeys)
+    const selectedRows = monitorRows.filter((row) => selectedKeys.has(monitorRowKey(row)))
+    if (selectedRows.length) setPendingMonitorDelete(selectedRows)
+  }
+
+  const confirmMonitorDelete = () => {
+    const targets = pendingMonitorDelete
+    if (!targets?.length) return
+    const targetKeys = new Set(targets.map(monitorRowKey))
+    const nextRows = monitorRows.filter((row) => !targetKeys.has(monitorRowKey(row)))
+    const deleted = monitorRows.length - nextRows.length
+    setMonitorRows(nextRows)
+    setMonitorDailyAdditions((current) => ({
+      ...current,
+      keys: current.keys.filter((key) => !targetKeys.has(key)),
+    }))
+    setPendingMonitorDelete(null)
+    setSelectedMonitorRowKeys((current) => current.filter((key) => !targetKeys.has(key)))
+    recordMonitorSync('delete', 0, deleted, nextRows.length)
+    if (targets.some((target) => normalized(selectedAsin) === normalized(target.asin))) setSelectedAsin(nextRows[0]?.asin ?? '')
+    setStatus(`已从完整 SKU / ASIN 监控清单删除 ${deleted} 条关系，并进入云端自动同步队列。`)
   }
 
   const refreshOnlineMappings = () => {
     setIsRefreshingOnline(true)
     window.setTimeout(() => {
-      setOnlineRows((rows) => applyMappingsToOnlineRows(rows, mappingRows))
+      setMonitorRows((rows) => applyMappingsToMonitorRows(rows, mappingIndex))
       setBatchOnlineRows((rows) => rows.map((row) => {
-        const mapping = mappingBySku.get(normalized(row.sku))
-        return mapping ? { ...row, owner: mapping.owner, group: mapping.group, account: mapping.account } : row
+        const mapping = resolveMapping(row, mappingIndex).mapping
+        return mapping ? {
+          ...row,
+          owner: row.owner || mapping.owner,
+          group: row.group || mapping.group,
+          account: row.account || mapping.account,
+        } : row
       }))
       setIsRefreshingOnline(false)
-      setStatus(`已重新匹配 ${onlineRows.length} 条在线记录。`)
+      setStatus(`已检查 ${monitorRows.length} 条监控关系；已有归属保持不变，仅空字段按映射补齐。`)
     }, 450)
   }
 
@@ -2594,6 +2803,7 @@ function App() {
       price: '',
       todayRank: '',
       yesterdayRank: '',
+      stockStatus: '',
     })
     setOpenResultFilter(null)
     setStatus('已清空运营看板筛选条件。')
@@ -2638,7 +2848,7 @@ function App() {
           <div className="erp-nav-list">
             <button className={activePage === 'add-monitor' ? 'active-nav' : ''} type="button" onClick={() => openPage('add-monitor')}>
               <Plus size={15} />添加监控ASIN
-              <span>{onlineRows.length}</span>
+              <span>{monitorRows.length}</span>
             </button>
           </div>
         </section>
@@ -2685,7 +2895,13 @@ function App() {
 
               <section className="results-stack dashboard-results-stack">
                 <div className="table-panel full-span-panel">
-                  <div className="section-heading"><h2>检索结果</h2><span>{filteredRows.length} 条</span></div>
+                  <div className="section-heading">
+                    <h2>检索结果</h2>
+                    <div className="results-heading-actions">
+                      <span>{filteredRows.length} 条 · 已选 {selectedMonitorRowKeys.length} 条</span>
+                      <button className="bulk-delete-button" disabled={!selectedMonitorRowKeys.length} type="button" onClick={requestSelectedMonitorRowsDelete}><Trash2 size={14} />一键删除</button>
+                    </div>
+                  </div>
                   <div className="data-table-wrap resizable-results-wrap" style={{ maxHeight: `${resultsPanelHeight}px` }}>
                     <table className="data-table">
                       <colgroup>
@@ -2697,8 +2913,11 @@ function App() {
                         <col style={{ width: `${resultColumnWidths.price}px` }} />
                         <col style={{ width: `${resultColumnWidths.todayRank}px` }} />
                         <col style={{ width: `${resultColumnWidths.yesterdayRank}px` }} />
+                        <col style={{ width: `${resultColumnWidths.stockStatus}px` }} />
+                        <col style={{ width: '72px' }} />
+                        <col style={{ width: '64px' }} />
                       </colgroup>
-                      <thead><tr>{renderResultHeader('owner', '运营')}{renderResultHeader('sku', 'SKU')}{renderResultHeader('asinType', '类型')}{renderResultHeader('brand', '品牌')}{renderResultHeader('asin', 'ASIN')}{renderResultHeader('price', '价格')}{renderResultHeader('todayRank', '今日排名')}{renderResultHeader('yesterdayRank', '昨日排名')}</tr></thead>
+                      <thead><tr>{renderResultHeader('owner', '运营')}{renderResultHeader('sku', 'SKU')}{renderResultHeader('asinType', '类型')}{renderResultHeader('brand', '品牌')}{renderResultHeader('asin', 'ASIN')}{renderResultHeader('price', '价格')}{renderResultHeader('todayRank', '今日排名')}{renderResultHeader('yesterdayRank', '昨日排名')}{renderResultHeader('stockStatus', '备货状态')}<th className="result-action-heading">操作</th><th className="result-select-heading"><label><input aria-label="全选当前检索结果" checked={allVisibleRowsSelected} type="checkbox" onChange={(event) => toggleVisibleMonitorRows(event.target.checked)} /><span>多选</span></label></th></tr></thead>
                       <tbody>{visibleRows.map((row, index) => {
                         const previous = visibleRows[index - 1]
                         const next = visibleRows[index + 1]
@@ -2709,7 +2928,7 @@ function App() {
                         return <tr className={`${row.asin === selectedAsin ? 'selected-row' : ''} ${isGroupStart ? 'sku-group-start' : ''} ${isGroupEnd ? 'sku-group-end' : ''}`} key={`${row.sku}-${row.asin}-${index}`} onClick={() => setSelectedAsin(row.asin)}><td>{row.owner || '-'}</td><td className="sku-cell">{row.sku}</td><td><span className={`type-tag ${typeClass}`}>{row.asinType || '-'}</span></td><td>{row.keepa?.brand || '-'}</td><td className="asin-cell"><button className="asin-trigger" type="button" onClick={(event) => {
                           event.stopPropagation()
                           setSelectedAsin(row.asin)
-                        }}>{row.asin}</button></td><td>{renderMetric(row.keepa?.price, priceChange, 'price')}</td><td>{renderRankComparison(row.keepa?.rank, row.yesterdayKeepa?.rank)}</td><td>{typeof row.yesterdayKeepa?.rank === 'number' ? row.yesterdayKeepa.rank.toLocaleString() : '-'}</td></tr>
+                        }}>{row.asin}</button></td><td>{renderMetric(row.keepa?.price, priceChange, 'price')}</td><td>{renderRankComparison(row.keepa?.rank, row.yesterdayKeepa?.rank)}</td><td>{typeof row.yesterdayKeepa?.rank === 'number' ? row.yesterdayKeepa.rank.toLocaleString() : '-'}</td><td><span className={`stock-status-tag ${row.hasMapping ? 'stock-status-active' : 'stock-status-inactive'}`} title={row.mappingStatus === 'composite-primary' ? `A+B 已按主 SKU ${row.matchedSku} 匹配` : row.hasMapping ? '已匹配映射信息' : '未匹配映射信息'}>{row.stockStatus}</span></td><td className="result-action-cell"><button aria-label={`删除 ${row.sku} ${row.asin}`} className="row-icon danger" title="从监控清单删除" type="button" onClick={(event) => { event.stopPropagation(); requestMonitorDelete(row) }}><Trash2 size={15} /></button></td><td className="result-select-cell"><input aria-label={`选择 ${row.sku} ${row.asin}`} checked={selectedMonitorRowKeys.includes(monitorRowKey(row))} type="checkbox" onClick={(event) => event.stopPropagation()} onChange={(event) => toggleMonitorRowSelection(row, event.target.checked)} /></td></tr>
                       })}</tbody>
                     </table>
                   </div>
@@ -2789,7 +3008,7 @@ function App() {
                   <div className="panel-title"><Upload size={16} />数据上传</div>
                   <div className="upload-stack">
                     {(Object.keys(uploadLabels) as UploadKind[]).map((kind) => (
-                      <div className="upload-row" key={kind}>
+                      <div className={`upload-row ${kind === 'keepa' ? '' : 'upload-row-preview'}`} key={kind}>
                         <label className="upload-button">
                           <Upload size={16} />
                           <span>{uploadLabels[kind]}</span>
@@ -2798,6 +3017,11 @@ function App() {
                         <button className="icon-button" title={downloadLabels[kind]} type="button" onClick={() => handleSidebarDownload(kind)}>
                           <Download size={16} />
                         </button>
+                        {kind !== 'keepa' ? (
+                          <button className="icon-button" title={`查看全部${uploadLabels[kind]}数据`} type="button" onClick={() => setDataPreviewMode(kind)}>
+                            <Eye size={16} />
+                          </button>
+                        ) : null}
                       </div>
                     ))}
                   </div>
@@ -2818,32 +3042,18 @@ function App() {
                   <div className="panel-title"><FileSpreadsheet size={16} />同步摘要</div>
                   <div className="sidebar-metric-list">
                     <div className="sidebar-metric-item"><span>待补映射</span><strong>{unmatchedOnlineRows.length}</strong></div>
-                    <div className="sidebar-metric-item"><span>在线新增</span><strong>{onlineRows.length}</strong></div>
-                    <div className="sidebar-metric-item"><span>历史无映射</span><strong>{unmatchedHistoricalRows.length}</strong></div>
+                    <div className="sidebar-metric-item"><span>完整监控清单</span><strong>{monitorRows.length}</strong></div>
+                    <div className="sidebar-metric-item"><span>匹配冲突</span><strong>{ambiguousMonitorRows.length}</strong></div>
                     <div className="sidebar-metric-item"><span>趋势天数</span><strong>{historyDayCount}</strong></div>
                     <div className="sidebar-metric-item"><span>云端同步</span><strong>{formatSyncTime(sharedSyncAt)}</strong></div>
                   </div>
                 </section>
 
                 <section className="sidebar-note-panel page-panel">
-                  <div className="panel-title"><Database size={16} />在线新增待补映射</div>
+                  <div className="panel-title"><Database size={16} />监控清单待补映射</div>
                   <strong>{unmatchedOnlineRows.length}</strong>
-                  <p className="status-text">这些平台 SKU 已新增监控，但映射总表还没补齐。</p>
+                  <p className="status-text">按平台 SKU 去重统计；A+B 会先提取 A 重新匹配，清单已有归属不会被覆盖。</p>
                   <button className="reset-button" disabled={!unmatchedOnlineRows.length} type="button" onClick={() => exportUnmatchedOnlineRows(unmatchedOnlineRows)}>导出待补映射SKU</button>
-                </section>
-
-                <section className="sidebar-note-panel page-panel">
-                  <div className="panel-title"><Database size={16} />历史监控当前无映射</div>
-                  <strong>{unmatchedHistoricalRows.length}</strong>
-                  <p className="status-text">导出处理表后，可填写删除或保留并更新最新平台SKU，再回传刷新监控清单。</p>
-                  <div className="upload-stack">
-                    <button className="reset-button" disabled={!unmatchedHistoricalRows.length} type="button" onClick={() => exportHistoricalUnmatchedRows(unmatchedHistoricalRows, keepaRows)}>导出历史无映射清单</button>
-                    <label className="upload-button secondary-upload-button">
-                      <RefreshCw size={16} />
-                      <span>上传处理结果并刷新</span>
-                      <input accept=".xlsx,.xls,.csv" type="file" onChange={(event) => { const file = event.currentTarget.files?.[0] ?? null; event.currentTarget.value = ''; void handleHistoricalUnmatchedRefreshUpload(file) }} />
-                    </label>
-                  </div>
                 </section>
 
                 <section className="sidebar-note-panel page-panel">
@@ -2863,6 +3073,13 @@ function App() {
                 <section className="sidebar-info-panel page-panel">
                   <div className="panel-title"><Upload size={16} />上传后说明</div>
                   <div className="sidebar-upload-summary">
+                    <section className={`sidebar-upload-role upload-role-${monitorSyncReport.updatedAt ? 'success' : 'idle'}`}>
+                      <div className="sidebar-upload-role-heading"><strong>监控清单回传</strong><span>{monitorSyncActionLabels[monitorSyncReport.action]}</span></div>
+                      <p>回传时间：{formatSyncTime(monitorSyncReport.updatedAt)}</p>
+                      <p>本次新增 {monitorSyncReport.added.toLocaleString()} 条 · 删除 {monitorSyncReport.deleted.toLocaleString()} 条</p>
+                      <p>当前完整清单 {monitorRows.length.toLocaleString()} 条</p>
+                      <p>{isSharedStateConfigured ? `云端最近写入：${formatSyncTime(sharedSyncAt)}` : '当前未配置 Supabase，仅保存本地'}</p>
+                    </section>
                     {([
                       ['yesterday', '昨日数据源'],
                       ['today', '今日数据源'],
@@ -2886,6 +3103,19 @@ function App() {
                         {uploadSummary.errors.length ? <ul className="report-list report-error compact-report-list">{uploadSummary.errors.map((error) => <li key={error}>{error}</li>)}</ul> : null}
                       </div>
                     ) : null}
+                    {(['mapping', 'monitor'] as const).map((kind) => {
+                      const report = sourceUploadReports[kind]
+                      const statusLabel = report.status === 'success' ? '上传成功' : report.status === 'error' ? '上传失败' : report.status === 'processing' ? '校验中' : '等待上传'
+                      return (
+                        <section className={`sidebar-upload-role upload-role-${report.status}`} key={kind}>
+                          <div className="sidebar-upload-role-heading"><strong>{uploadLabels[kind]}</strong><span>{statusLabel}</span></div>
+                          <p>{report.fileName || '尚未选择文件'}</p>
+                          {report.status === 'success' ? <p>已解析并写入 {report.imported.toLocaleString()} 条</p> : null}
+                          {report.notes.length ? <ul className="report-list compact-report-list">{report.notes.map((note) => <li key={note}>{note}</li>)}</ul> : null}
+                          {report.errors.length ? <ul className="report-list report-error compact-report-list">{report.errors.map((error) => <li key={error}>{error}</li>)}</ul> : null}
+                        </section>
+                      )
+                    })}
                   </div>
                 </section>
               </section>
@@ -2937,8 +3167,10 @@ function App() {
                     </colgroup>
                     <thead><tr><th>平台 SKU</th><th>ASIN 分类</th><th>ASIN</th><th>运营</th><th>组别</th><th>账号</th><th>操作</th></tr></thead>
                     <tbody>{batchOnlineRows.map((row, index) => {
-                      const matched = mappingBySku.get(normalized(row.sku))
+                      const mappingResult = resolveMapping(row, mappingIndex)
+                      const matched = mappingResult.mapping
                       const needsManual = Boolean(row.sku && !matched)
+                      const needsAccount = mappingResult.status === 'ambiguous'
                       return <tr key={`batch-${index}`}>
                         <td><input className="table-input" placeholder="填写平台SKU" value={row.sku} onChange={(event) => updateBatchOnlineCell(index, 'sku', event.target.value)} onPaste={(event) => {
                           const handled = handleBatchPaste(index, 'sku', event.clipboardData.getData('text'))
@@ -2960,7 +3192,7 @@ function App() {
                           const handled = handleBatchPaste(index, 'group', event.clipboardData.getData('text'))
                           if (handled) event.preventDefault()
                         }} /></td>
-                        <td><input className={`table-input ${matched ? 'mapped-field' : ''}`} placeholder={needsManual ? '未匹配手动填写' : '自动匹配'} readOnly={Boolean(matched)} value={row.account} onChange={(event) => updateBatchOnlineCell(index, 'account', event.target.value)} onPaste={(event) => {
+                        <td><input className={`table-input ${matched ? 'mapped-field' : ''}`} placeholder={needsAccount ? '多个账号，请填写账号' : needsManual ? '未匹配手动填写' : '自动匹配'} readOnly={Boolean(matched)} value={row.account} onChange={(event) => updateBatchOnlineCell(index, 'account', event.target.value)} onPaste={(event) => {
                           const handled = handleBatchPaste(index, 'account', event.clipboardData.getData('text'))
                           if (handled) event.preventDefault()
                         }} /></td>
@@ -2972,15 +3204,63 @@ function App() {
                     <button type="button" onClick={addBatchOnlineLine}><Plus size={16} />新增一行</button>
                   </div>
                 </div>
-                <div className="mini-table-wrap online-table-wrap"><table className="data-table mini-table"><thead><tr><th>平台 SKU</th><th>ASIN 分类</th><th>ASIN</th><th>账号</th><th>组别</th><th>运营</th><th>匹配状态</th><th>操作</th></tr></thead><tbody>{onlineRows.length ? onlineRows.map((row, index) => {
-                  const matched = mappingBySku.has(normalized(row.sku))
-                  return <tr key={`${monitorRowKey(row)}-${index}`}><td className="sku-cell">{row.sku}</td><td>{row.asinType}</td><td className="asin-cell">{row.asin}</td><td>{row.account || '-'}</td><td>{row.group || '-'}</td><td>{row.owner || '-'}</td><td>{matched ? <span className="source-tag source-tag-mapped">已映射</span> : <span className="source-tag source-tag-manual"><AlertTriangle size={13} />手动填写</span>}</td><td><button className="row-icon" title="编辑" type="button" onClick={() => startOnlineEdit(index)}><Edit3 size={14} /></button><button className="row-icon danger" title="删除" type="button" onClick={() => deleteOnlineRow(index)}><Trash2 size={14} /></button></td></tr>
-                }) : <tr><td className="empty-cell" colSpan={8}>暂无在线添加数据</td></tr>}</tbody></table></div>
+                <div className="source-meta"><span>新增SKU监控 · {new Date().toLocaleDateString('sv-SE')}</span><strong>{todayAddedMonitorRows.length.toLocaleString()} 条</strong></div>
+                <div className="mini-table-wrap online-table-wrap"><table className="data-table mini-table"><thead><tr><th>平台 SKU</th><th>ASIN 分类</th><th>ASIN</th><th>账号</th><th>组别</th><th>运营</th><th>匹配状态</th><th>操作</th></tr></thead><tbody>{todayAddedMonitorRows.length ? todayAddedMonitorRows.map((row, index) => {
+                  const mappingResult = resolveMapping(row, mappingIndex)
+                  const matched = Boolean(mappingResult.mapping)
+                  const statusText = mappingResult.status === 'ambiguous' ? '账号冲突' : '手动填写'
+                  return <tr key={`${monitorRowKey(row)}-${index}`}><td className="sku-cell">{row.sku}</td><td>{row.asinType}</td><td className="asin-cell">{row.asin}</td><td>{row.account || '-'}</td><td>{row.group || '-'}</td><td>{row.owner || '-'}</td><td>{matched ? <span className="source-tag source-tag-mapped">映射可用</span> : <span className="source-tag source-tag-manual"><AlertTriangle size={13} />{statusText}</span>}</td><td><button className="row-icon" title="编辑" type="button" onClick={() => startOnlineEdit(row)}><Edit3 size={14} /></button><button className="row-icon danger" title="从监控清单删除" type="button" onClick={() => requestMonitorDelete(row)}><Trash2 size={14} /></button></td></tr>
+                }) : <tr><td className="empty-cell" colSpan={8}>今日暂无新增SKU监控</td></tr>}</tbody></table></div>
               </section>
             </>
           ) : null}
         </div>
       </section>
+
+      {dataPreviewMode ? (
+        <div className="modal-backdrop">
+          <section aria-labelledby="data-preview-title" aria-modal="true" className="data-preview-dialog" role="dialog">
+            <div className="data-preview-heading">
+              <div>
+                <span className="eyebrow">固定数据源 · 全量可视化</span>
+                <h2 id="data-preview-title">{uploadLabels[dataPreviewMode]}</h2>
+                <p>{sourceReports[dataPreviewMode].fileName} · 共 {(dataPreviewMode === 'mapping' ? mappingRows.length : monitorRows.length).toLocaleString()} 条 · {sourceReports[dataPreviewMode].updatedAt}</p>
+              </div>
+              <button className="row-icon" title="关闭数据预览" type="button" onClick={() => setDataPreviewMode(null)}><CircleX size={18} /></button>
+            </div>
+            <div className="data-preview-table-wrap">
+              {dataPreviewMode === 'mapping' ? (
+                <table className="data-table mini-table">
+                  <thead><tr><th>序号</th><th>平台 SKU</th><th>系统 SKU</th><th>店铺别名</th><th>运营</th><th>小组</th></tr></thead>
+                  <tbody>{mappingRows.map((row, index) => <tr key={`${mappingCompositeKey(row)}-${index}`}><td>{index + 1}</td><td className="sku-cell">{row.sku}</td><td>{row.systemSku}</td><td>{row.account}</td><td>{row.owner}</td><td>{row.group}</td></tr>)}</tbody>
+                </table>
+              ) : (
+                <table className="data-table mini-table">
+                  <thead><tr><th>序号</th><th>平台 SKU</th><th>ASIN 分类</th><th>ASIN</th><th>账号</th><th>运营</th><th>组别</th><th>备注</th></tr></thead>
+                  <tbody>{monitorRows.map((row, index) => <tr key={`${monitorRowKey(row)}-${index}`}><td>{index + 1}</td><td className="sku-cell">{row.sku}</td><td>{row.asinType}</td><td className="asin-cell">{row.asin}</td><td>{row.account}</td><td>{row.owner}</td><td>{row.group}</td><td>{row.note}</td></tr>)}</tbody>
+                </table>
+              )}
+            </div>
+          </section>
+        </div>
+      ) : null}
+
+      {pendingMonitorDelete ? (
+        <div className="modal-backdrop">
+          <section aria-describedby="monitor-delete-description" aria-labelledby="monitor-delete-title" aria-modal="true" className="save-snapshot-dialog delete-monitor-dialog" role="dialog">
+            <div className="dialog-heading delete-dialog-heading"><Trash2 size={20} /><div><span className="eyebrow">同步修改完整监控清单</span><h2 id="monitor-delete-title">{pendingMonitorDelete.length > 1 ? `是否删除已选 ${pendingMonitorDelete.length} 条数据？` : '确定删除这条监控关系？'}</h2></div></div>
+            <p id="monitor-delete-description">
+              {pendingMonitorDelete.length > 1
+                ? <>删除后，已选的 <strong>{pendingMonitorDelete.length}</strong> 条整行数据将同时从检索结果和 SKU / ASIN 监控清单移除，并自动回传 Supabase 云端。</>
+                : <>删除后，<strong>{pendingMonitorDelete[0].sku}</strong> / <strong>{pendingMonitorDelete[0].asin}</strong> 将同时从检索结果和 SKU / ASIN 监控清单移除，并自动回传 Supabase 云端。</>}
+            </p>
+            <div className="dialog-actions">
+              <button autoFocus className="dialog-button dialog-button-cancel" type="button" onClick={() => setPendingMonitorDelete(null)}>{pendingMonitorDelete.length > 1 ? '保留' : '不删除'}</button>
+              <button className="dialog-button dialog-button-danger" type="button" onClick={confirmMonitorDelete}><Trash2 size={16} />{pendingMonitorDelete.length > 1 ? '删除' : '确定删除'}</button>
+            </div>
+          </section>
+        </div>
+      ) : null}
 
       {pendingKeepaUpload ? (
         <div className="modal-backdrop">
